@@ -83,6 +83,32 @@ with st.sidebar:
     train_split = st.slider("訓練集比例", min_value=0.5, max_value=0.9, value=0.8, step=0.05)
 
     st.divider()
+    st.subheader("🏦 現實市場設定")
+    slippage_bps = st.slider("基礎滑價（bps）", min_value=0.0, max_value=30.0, value=8.0, step=1.0)
+    spread_bps = st.slider("買賣價差（bps）", min_value=0.0, max_value=20.0, value=4.0, step=1.0)
+    min_trade_pct = st.slider("最小成交比例", min_value=0.0, max_value=0.10, value=0.02, step=0.005)
+    position_step = st.select_slider("單次調倉步長", options=[0.10, 0.20, 0.25, 0.33, 0.50], value=0.25)
+    slippage_vol_multiplier = st.slider("高波動滑價放大倍數", min_value=0.0, max_value=3.0, value=1.2, step=0.1)
+
+    st.divider()
+    st.subheader("🧪 Walk-forward 回測")
+    enable_walk_forward = st.checkbox("啟用 Walk-forward 滾動回測", value=False)
+    if enable_walk_forward:
+        wf_train_window = st.number_input("每折訓練長度（bars）", min_value=120, value=360, step=60)
+        wf_test_window = st.number_input("每折測試長度（bars）", min_value=48, value=120, step=24)
+        wf_max_folds = st.number_input("最多折數", min_value=2, max_value=12, value=5, step=1)
+        wf_timesteps = st.select_slider(
+            "每折訓練步數",
+            options=[10_000, 20_000, 30_000, 50_000, 80_000],
+            value=20_000,
+        )
+    else:
+        wf_train_window = 360
+        wf_test_window = 120
+        wf_max_folds = 5
+        wf_timesteps = 20_000
+
+    st.divider()
     st.subheader("🧠 Regime 門檻控制")
     if "base_threshold" not in st.session_state:
         st.session_state.base_threshold = 0.55
@@ -400,6 +426,140 @@ def infer_next_signal(model, df: pd.DataFrame, feature_cols: list, current_regim
     }
 
 
+def run_walk_forward_backtest(
+    df: pd.DataFrame,
+    feature_cols: list,
+    initial_balance: float,
+    trade_fee: float,
+    train_window: int,
+    test_window: int,
+    max_folds: int,
+    timesteps_per_fold: int,
+    slippage_bps: float,
+    spread_bps: float,
+    min_trade_pct: float,
+    position_step: float,
+    slippage_vol_multiplier: float,
+):
+    rows = []
+    fold = 0
+    start = 0
+
+    while fold < max_folds and (start + train_window + test_window) <= len(df):
+        fold += 1
+        train_df = df.iloc[start : start + train_window].reset_index(drop=True)
+        test_df = df.iloc[start + train_window : start + train_window + test_window].reset_index(drop=True)
+
+        def make_train_env(local_train_df=train_df):
+            return BitcoinTradingEnv(
+                df=local_train_df,
+                feature_cols=feature_cols,
+                initial_balance=initial_balance,
+                trade_fee=trade_fee,
+                slippage_bps=slippage_bps,
+                spread_bps=spread_bps,
+                min_trade_pct=min_trade_pct,
+                position_step=position_step,
+                slippage_vol_multiplier=slippage_vol_multiplier,
+            )
+
+        train_env = DummyVecEnv([make_train_env])
+        model = PPO(
+            policy="MlpPolicy",
+            env=train_env,
+            learning_rate=5e-4,
+            n_steps=1024,
+            batch_size=32,
+            n_epochs=10,
+            gamma=0.99,
+            gae_lambda=0.95,
+            clip_range=0.2,
+            ent_coef=0.02,
+            verbose=0,
+            device="auto",
+            seed=100 + fold,
+        )
+        model.learn(total_timesteps=int(timesteps_per_fold))
+
+        test_env = BitcoinTradingEnv(
+            df=test_df,
+            feature_cols=feature_cols,
+            initial_balance=initial_balance,
+            trade_fee=trade_fee,
+            slippage_bps=slippage_bps,
+            spread_bps=spread_bps,
+            min_trade_pct=min_trade_pct,
+            position_step=position_step,
+            slippage_vol_multiplier=slippage_vol_multiplier,
+        )
+
+        metrics, equity_curve, action_history = evaluate_agent(model, test_env)
+        adv = compute_advanced_metrics(equity_curve, action_history)
+
+        rows.append(
+            {
+                "Fold": fold,
+                "Start": int(start),
+                "End": int(start + train_window + test_window),
+                "CumulativeReturn": float(metrics["cumulative_return"]),
+                "Sharpe": float(metrics["sharpe_ratio"]),
+                "MaxDrawdown": float(metrics["max_drawdown"]),
+                "Sortino": float(adv["sortino_ratio"]),
+                "Calmar": float(adv["calmar_ratio"]),
+            }
+        )
+
+        start += test_window
+
+    return pd.DataFrame(rows)
+
+
+def run_cost_stress_test(
+    model,
+    test_df: pd.DataFrame,
+    feature_cols: list,
+    initial_balance: float,
+    trade_fee: float,
+    slippage_bps: float,
+    spread_bps: float,
+    min_trade_pct: float,
+    position_step: float,
+    slippage_vol_multiplier: float,
+):
+    scenarios = [
+        ("Base", trade_fee, slippage_bps, spread_bps),
+        ("Fee x2", trade_fee * 2.0, slippage_bps, spread_bps),
+        ("Slippage x2", trade_fee, slippage_bps * 2.0, spread_bps),
+        ("Spread x2", trade_fee, slippage_bps, spread_bps * 2.0),
+    ]
+
+    rows = []
+    for name, fee, slip, spr in scenarios:
+        env = BitcoinTradingEnv(
+            df=test_df,
+            feature_cols=feature_cols,
+            initial_balance=initial_balance,
+            trade_fee=float(fee),
+            slippage_bps=float(slip),
+            spread_bps=float(spr),
+            min_trade_pct=min_trade_pct,
+            position_step=position_step,
+            slippage_vol_multiplier=slippage_vol_multiplier,
+        )
+        metrics, equity_curve, _ = evaluate_agent(model, env)
+        rows.append(
+            {
+                "Scenario": name,
+                "FinalNetWorth": float(equity_curve[-1]),
+                "CumulativeReturn": float(metrics["cumulative_return"]),
+                "Sharpe": float(metrics["sharpe_ratio"]),
+                "MaxDrawdown": float(metrics["max_drawdown"]),
+            }
+        )
+
+    return pd.DataFrame(rows)
+
+
 # ──────────────────────────────────────────────
 # 執行
 # ──────────────────────────────────────────────
@@ -430,6 +590,11 @@ if run_btn:
                 feature_cols=feature_cols,
                 initial_balance=float(initial_balance),
                 trade_fee=trade_fee,
+                slippage_bps=slippage_bps,
+                spread_bps=spread_bps,
+                min_trade_pct=min_trade_pct,
+                position_step=float(position_step),
+                slippage_vol_multiplier=slippage_vol_multiplier,
             )
 
         train_env = DummyVecEnv([make_train_env])
@@ -468,8 +633,26 @@ if run_btn:
             feature_cols=feature_cols,
             initial_balance=float(initial_balance),
             trade_fee=trade_fee,
+            slippage_bps=slippage_bps,
+            spread_bps=spread_bps,
+            min_trade_pct=min_trade_pct,
+            position_step=float(position_step),
+            slippage_vol_multiplier=slippage_vol_multiplier,
         )
         metrics, equity_curve, action_history = evaluate_agent(model, test_env)
+
+        stress_df = run_cost_stress_test(
+            model=model,
+            test_df=test_df,
+            feature_cols=feature_cols,
+            initial_balance=float(initial_balance),
+            trade_fee=trade_fee,
+            slippage_bps=slippage_bps,
+            spread_bps=spread_bps,
+            min_trade_pct=min_trade_pct,
+            position_step=float(position_step),
+            slippage_vol_multiplier=slippage_vol_multiplier,
+        )
 
         # Buy & Hold baseline
         test_prices = test_df["Close"].values
@@ -532,6 +715,11 @@ if run_btn:
         a3.metric("交易次數", f"{adv['trade_count']}")
         a4.metric("交易密度", f"{adv['trade_density'] * 100:.1f} %")
 
+        st.subheader("🧱 成本壓力測試")
+        st.dataframe(stress_df, use_container_width=True)
+        stress_chart = stress_df.set_index("Scenario")[["FinalNetWorth"]]
+        st.bar_chart(stress_chart)
+
         if yf_interval == "1d":
             st.info("此訊號對應下一根日線（可視為明日建議）。")
         else:
@@ -562,6 +750,39 @@ if run_btn:
                 eq_df["Datetime"] = time_axis
                 eq_df = eq_df.set_index("Datetime")
             st.line_chart(eq_df)
+
+        if enable_walk_forward:
+            with st.spinner("執行 Walk-forward 滾動回測中..."):
+                wf_df = run_walk_forward_backtest(
+                    df=df,
+                    feature_cols=feature_cols,
+                    initial_balance=float(initial_balance),
+                    trade_fee=trade_fee,
+                    train_window=int(wf_train_window),
+                    test_window=int(wf_test_window),
+                    max_folds=int(wf_max_folds),
+                    timesteps_per_fold=int(wf_timesteps),
+                    slippage_bps=slippage_bps,
+                    spread_bps=spread_bps,
+                    min_trade_pct=min_trade_pct,
+                    position_step=float(position_step),
+                    slippage_vol_multiplier=slippage_vol_multiplier,
+                )
+
+            if not wf_df.empty:
+                st.subheader("🔁 Walk-forward 回測結果")
+                st.dataframe(wf_df, use_container_width=True)
+                wf_summary = pd.DataFrame(
+                    {
+                        "AvgReturn": [wf_df["CumulativeReturn"].mean()],
+                        "AvgSharpe": [wf_df["Sharpe"].mean()],
+                        "AvgMaxDrawdown": [wf_df["MaxDrawdown"].mean()],
+                    }
+                )
+                st.dataframe(wf_summary, use_container_width=True)
+                st.line_chart(wf_df.set_index("Fold")[["CumulativeReturn", "Sharpe"]])
+            else:
+                st.warning("Walk-forward 參數超出資料長度，請調小訓練/測試窗口或折數。")
 
         # 8) 訓練資料摘要
         with st.expander("📋 原始資料摘要"):

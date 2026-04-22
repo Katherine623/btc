@@ -169,14 +169,13 @@ def build_feature_columns() -> list:
 # =========================================================
 class BitcoinTradingEnv(gym.Env):
     """
-    Discrete action trading env:
+    Discrete action trading env (realism-focused):
     0 = Hold
-    1 = Buy  (target position -> 1)
-    2 = Sell (target position -> 0)
+    1 = Increase position by fixed step
+    2 = Decrease position by fixed step
 
     position:
-    - 0 = no BTC
-    - 1 = fully invested in BTC
+    - continuous ratio in [0, 1]
 
     Reward:
     portfolio change - drawdown penalty - turnover penalty
@@ -189,6 +188,11 @@ class BitcoinTradingEnv(gym.Env):
         feature_cols: list,
         initial_balance: float = 10000.0,
         trade_fee: float = 0.001,      # 0.1%
+        slippage_bps: float = 8.0,
+        spread_bps: float = 4.0,
+        min_trade_pct: float = 0.02,
+        position_step: float = 0.25,
+        slippage_vol_multiplier: float = 1.2,
         window_size: int = 1,
     ):
         super().__init__()
@@ -197,9 +201,19 @@ class BitcoinTradingEnv(gym.Env):
         self.feature_cols = feature_cols
         self.initial_balance = initial_balance
         self.trade_fee = trade_fee
+        self.slippage_bps = slippage_bps
+        self.spread_bps = spread_bps
+        self.min_trade_pct = min_trade_pct
+        self.position_step = position_step
+        self.slippage_vol_multiplier = slippage_vol_multiplier
         self.window_size = window_size
 
         self.prices = self.df["Close"].values.astype(np.float32)
+        if "volatility_10" in self.df.columns:
+            self.volatility_series = self.df["volatility_10"].fillna(0.0).values.astype(np.float32)
+        else:
+            self.volatility_series = np.zeros(len(self.df), dtype=np.float32)
+        self.vol_median = float(np.median(self.volatility_series) + 1e-8)
         self.features = self.df[self.feature_cols].values.astype(np.float32)
 
         # normalize features roughly
@@ -238,13 +252,14 @@ class BitcoinTradingEnv(gym.Env):
         self.current_step = 0
         self.balance = float(self.initial_balance)
         self.btc_units = 0.0
-        self.position = 0  # 0 cash, 1 fully long BTC
+        self.position = 0.0
         self.net_worth = float(self.initial_balance)
         self.prev_net_worth = float(self.initial_balance)
         self.peak_net_worth = float(self.initial_balance)
 
         self.net_worth_history = [self.net_worth]
         self.action_history = []
+        self.turnover_history = [0.0]
 
         obs = self._get_observation()
         info = {}
@@ -253,48 +268,64 @@ class BitcoinTradingEnv(gym.Env):
     def step(self, action):
         action = int(action)
         price = float(self.prices[self.current_step])
+        vol_now = float(self.volatility_series[self.current_step])
 
-        old_net_worth = self.net_worth
+        current_notional = self.btc_units * price
+        old_net_worth = self.balance + current_notional
         executed_trade = False
+        executed_notional = 0.0
 
         # action handling
-        # 0 = hold
-        # 1 = buy  -> all in BTC if currently in cash
-        # 2 = sell -> liquidate BTC if currently holding
-        if action == 1 and self.position == 0:
-            # buy all with fee
-            spendable = self.balance * (1.0 - self.trade_fee)
-            self.btc_units = spendable / price
-            self.balance = 0.0
-            self.position = 1
-            executed_trade = True
+        target_position = self.position
+        if action == 1:
+            target_position = min(1.0, self.position + self.position_step)
+        elif action == 2:
+            target_position = max(0.0, self.position - self.position_step)
 
-        elif action == 2 and self.position == 1:
-            # sell all with fee
-            proceeds = self.btc_units * price * (1.0 - self.trade_fee)
-            self.balance = proceeds
-            self.btc_units = 0.0
-            self.position = 0
-            executed_trade = True
+        target_notional = target_position * old_net_worth
+        trade_notional = target_notional - current_notional
+        min_notional = self.min_trade_pct * old_net_worth
 
-        # update net worth
-        if self.position == 1:
-            self.net_worth = self.btc_units * price
-        else:
-            self.net_worth = self.balance
+        vol_scale = vol_now / self.vol_median
+        dynamic_slippage = (self.slippage_bps / 10000.0) * (1.0 + self.slippage_vol_multiplier * vol_scale)
+        spread_cost = (self.spread_bps / 10000.0) * 0.5
+        total_cost_rate = self.trade_fee + dynamic_slippage + spread_cost
+
+        if abs(trade_notional) >= min_notional:
+            if trade_notional > 0:
+                max_affordable = self.balance / (1.0 + total_cost_rate)
+                buy_notional = min(trade_notional, max_affordable)
+                if buy_notional > 0:
+                    self.btc_units += buy_notional / price
+                    self.balance -= buy_notional * (1.0 + total_cost_rate)
+                    executed_notional = buy_notional
+                    executed_trade = True
+            else:
+                sell_notional = min(-trade_notional, current_notional)
+                if sell_notional > 0:
+                    self.btc_units -= sell_notional / price
+                    self.balance += sell_notional * (1.0 - total_cost_rate)
+                    executed_notional = sell_notional
+                    executed_trade = True
+
+        current_notional = self.btc_units * price
+        self.net_worth = self.balance + current_notional
+        self.position = float(current_notional / (self.net_worth + 1e-8))
 
         self.peak_net_worth = max(self.peak_net_worth, self.net_worth)
 
         # reward = portfolio change ratio + risk-aware penalties
         portfolio_change = (self.net_worth - old_net_worth) / (old_net_worth + 1e-8)
         drawdown = (self.peak_net_worth - self.net_worth) / (self.peak_net_worth + 1e-8)
-        drawdown_penalty = 0.08 * drawdown
-        turnover_penalty = 0.002 if executed_trade else 0.0
+        drawdown_penalty = 0.06 * drawdown
+        turnover_ratio = executed_notional / (old_net_worth + 1e-8)
+        turnover_penalty = 0.0015 * turnover_ratio
 
         reward = portfolio_change - drawdown_penalty - turnover_penalty
 
         self.action_history.append(action)
         self.net_worth_history.append(self.net_worth)
+        self.turnover_history.append(turnover_ratio)
 
         self.current_step += 1
 
@@ -309,6 +340,7 @@ class BitcoinTradingEnv(gym.Env):
             "btc_units": self.btc_units,
             "position": self.position,
             "drawdown": drawdown,
+            "turnover": turnover_ratio,
         }
 
         return obs, float(reward), terminated, truncated, info
