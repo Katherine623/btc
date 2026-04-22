@@ -77,8 +77,8 @@ with st.sidebar:
     trade_fee = st.slider("交易手續費", min_value=0.0, max_value=0.01, value=0.001, step=0.0005, format="%.4f")
     total_timesteps = st.select_slider(
         "訓練總步數",
-        options=[10_000, 50_000, 100_000, 200_000, 500_000],
-        value=100_000,
+        options=[50_000, 100_000, 200_000, 300_000, 500_000],
+        value=200_000,
     )
     train_split = st.slider("訓練集比例", min_value=0.5, max_value=0.9, value=0.8, step=0.05)
 
@@ -216,19 +216,29 @@ if run_btn:
 
         # 4) 訓練 PPO
         with st.spinner(f"訓練 PPO 模型中（{total_timesteps:,} 步）..."):
+            from stable_baselines3.common.policies import MlpPolicy
+            
+            # 增大網絡容量以提升學習能力
+            policy_kwargs = dict(
+                net_arch=[256, 256, 128],  # 更深的網絡
+                activation_fn=st.session_state.get("activation_fn", None),  # 使用 default (relu)
+            )
+            
             model = PPO(
                 policy="MlpPolicy",
                 env=train_env,
-                learning_rate=3e-4,
-                n_steps=2048,
-                batch_size=64,
-                n_epochs=10,
+                learning_rate=5e-4,  # 提高學習率以加快收斂
+                n_steps=1024,  # 降低以增加更新頻率
+                batch_size=32,  # 更小的批量以增加梯度更新
+                n_epochs=15,  # 增加 epoch 以更充分利用數據
                 gamma=0.99,
                 gae_lambda=0.95,
                 clip_range=0.2,
-                ent_coef=0.01,
+                ent_coef=0.02,  # 增加熵正則化以鼓勵探索
                 verbose=0,
                 device="auto",
+                policy_kwargs=policy_kwargs,
+                seed=42,  # 固定隨機種子以增加可重複性
             )
             model.learn(total_timesteps=total_timesteps)
             model.save(MODEL_PATH)

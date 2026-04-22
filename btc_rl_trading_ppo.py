@@ -279,8 +279,17 @@ class BitcoinTradingEnv(gym.Env):
         else:
             self.net_worth = self.balance
 
-        # reward = portfolio change ratio
-        reward = (self.net_worth - old_net_worth) / (old_net_worth + 1e-8)
+        # reward = portfolio change ratio + trading bonus
+        portfolio_change = (self.net_worth - old_net_worth) / (old_net_worth + 1e-8)
+        
+        # add incentive for action variety (avoid always holding)
+        action_bonus = 0.0
+        if action == 1 and self.position == 1:  # just bought
+            action_bonus = 0.02  # small bonus for buying
+        elif action == 2 and self.position == 0:  # just sold
+            action_bonus = 0.02  # small bonus for selling
+        
+        reward = portfolio_change + action_bonus * 0.1
 
         self.action_history.append(action)
         self.net_worth_history.append(self.net_worth)
