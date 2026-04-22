@@ -194,7 +194,43 @@ def plot_price_with_signals(test_df, action_history, time_axis, use_datetime):
     return fig
 
 
-def infer_next_signal(model, df: pd.DataFrame, feature_cols: list, initial_balance: float):
+def add_market_regime_labels(df: pd.DataFrame) -> pd.DataFrame:
+    labeled = df.copy()
+    vol = labeled["volatility_10"].fillna(0.0)
+    vol_high = float(vol.quantile(0.75))
+
+    regimes = []
+    for _, row in labeled.iterrows():
+        ma5 = float(row.get("ma_5", row.get("Close", 0.0)))
+        ma20 = float(row.get("ma_20", row.get("Close", 0.0)))
+        ret1 = float(row.get("return_1", 0.0))
+        v10 = float(row.get("volatility_10", 0.0))
+
+        if v10 >= vol_high:
+            regimes.append("high_volatility")
+        elif ma5 > ma20 and ret1 >= 0:
+            regimes.append("bull_trend")
+        elif ma5 < ma20 and ret1 <= 0:
+            regimes.append("bear_trend")
+        else:
+            regimes.append("range_bound")
+
+    labeled["market_regime"] = regimes
+    return labeled
+
+
+def get_regime_thresholds(regime: str):
+    # Stricter thresholds in noisy markets, looser thresholds in trending markets.
+    thresholds = {
+        "bull_trend": {"buy": 0.42, "sell": 0.62},
+        "bear_trend": {"buy": 0.62, "sell": 0.42},
+        "range_bound": {"buy": 0.55, "sell": 0.55},
+        "high_volatility": {"buy": 0.65, "sell": 0.65},
+    }
+    return thresholds.get(regime, {"buy": 0.55, "sell": 0.55})
+
+
+def infer_next_signal(model, df: pd.DataFrame, feature_cols: list, current_regime: str):
     # Use the latest engineered features plus a neutral portfolio state as next-period input.
     feats = df[feature_cols].values.astype(np.float32)
     feat_mean = feats.mean(axis=0, keepdims=True)
@@ -213,11 +249,25 @@ def infer_next_signal(model, df: pd.DataFrame, feature_cols: list, initial_balan
     action_idx = int(action)
     action_map = {0: "Hold", 1: "Buy", 2: "Sell"}
 
+    regime_thresholds = get_regime_thresholds(current_regime)
+    buy_prob = float(probs[1])
+    sell_prob = float(probs[2])
+
+    if buy_prob >= regime_thresholds["buy"] and buy_prob > sell_prob:
+        gated_action = 1
+    elif sell_prob >= regime_thresholds["sell"] and sell_prob > buy_prob:
+        gated_action = 2
+    else:
+        gated_action = 0
+
     return {
-        "action": action_idx,
-        "label": action_map.get(action_idx, "Hold"),
+        "action": gated_action,
+        "label": action_map.get(gated_action, "Hold"),
+        "raw_action": action_idx,
+        "raw_label": action_map.get(action_idx, "Hold"),
         "confidence": float(np.max(probs)),
         "probs": probs,
+        "thresholds": regime_thresholds,
     }
 
 
@@ -231,6 +281,7 @@ if run_btn:
 
         with st.spinner("計算技術指標..."):
             df = add_technical_indicators(df_raw)
+        df = add_market_regime_labels(df)
         feature_cols = build_feature_columns()
 
         # 2) 切分
@@ -306,12 +357,28 @@ if run_btn:
         m3.metric("最大回撤",            f"{metrics['max_drawdown'] * 100:.2f} %")
         m4.metric("最終資產（USD）",     f"{equity_curve[-1]:,.2f}")
 
+        # 6-0) 目前市場 Regime
+        current_regime = str(df["market_regime"].iloc[-1])
+        regime_name_map = {
+            "bull_trend": "多頭趨勢",
+            "bear_trend": "空頭趨勢",
+            "range_bound": "盤整震盪",
+            "high_volatility": "高波動",
+        }
+        regime_cn = regime_name_map.get(current_regime, current_regime)
+        st.subheader("🌦️ 目前市場 Regime")
+        r1, r2, r3 = st.columns(3)
+        r1.metric("Regime", regime_cn)
+        regime_thresholds = get_regime_thresholds(current_regime)
+        r2.metric("Buy 閾值", f"{regime_thresholds['buy'] * 100:.1f} %")
+        r3.metric("Sell 閾值", f"{regime_thresholds['sell'] * 100:.1f} %")
+
         # 6-1) 下一根 K 棒訊號（1d 時可視為明日訊號）
         next_signal = infer_next_signal(
             model=model,
             df=df,
             feature_cols=feature_cols,
-            initial_balance=float(initial_balance),
+            current_regime=current_regime,
         )
         st.subheader("🔮 下一根 K 棒建議訊號")
         s1, s2, s3, s4 = st.columns(4)
@@ -319,6 +386,11 @@ if run_btn:
         s2.metric("信心分數", f"{next_signal['confidence'] * 100:.1f} %")
         s3.metric("Buy 機率", f"{next_signal['probs'][1] * 100:.1f} %")
         s4.metric("Sell 機率", f"{next_signal['probs'][2] * 100:.1f} %")
+        st.caption(
+            f"原始策略動作: {next_signal['raw_label']}｜"
+            f"Regime 閾值 Buy>={next_signal['thresholds']['buy'] * 100:.1f}% / "
+            f"Sell>={next_signal['thresholds']['sell'] * 100:.1f}%"
+        )
 
         if yf_interval == "1d":
             st.info("此訊號對應下一根日線（可視為明日建議）。")
