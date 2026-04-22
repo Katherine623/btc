@@ -84,8 +84,59 @@ with st.sidebar:
 
     st.divider()
     st.subheader("🧠 Regime 門檻控制")
-    base_threshold = st.slider("基準信心閾值", min_value=0.45, max_value=0.75, value=0.55, step=0.01)
-    strictness_multiplier = st.slider("高波動嚴格倍數", min_value=1.0, max_value=1.4, value=1.15, step=0.05)
+    if "base_threshold" not in st.session_state:
+        st.session_state.base_threshold = 0.55
+    if "strictness_multiplier" not in st.session_state:
+        st.session_state.strictness_multiplier = 1.15
+    if "regime_preset" not in st.session_state:
+        st.session_state.regime_preset = "平衡"
+
+    regime_mode = st.radio(
+        "Regime 門檻模式",
+        ["自動模式", "進階模式"],
+        index=0,
+        horizontal=True,
+    )
+
+    st.caption("一鍵預設")
+    p1, p2, p3 = st.columns(3)
+    if p1.button("保守", use_container_width=True):
+        st.session_state.base_threshold = 0.62
+        st.session_state.strictness_multiplier = 1.25
+        st.session_state.regime_preset = "保守"
+    if p2.button("平衡", use_container_width=True):
+        st.session_state.base_threshold = 0.55
+        st.session_state.strictness_multiplier = 1.15
+        st.session_state.regime_preset = "平衡"
+    if p3.button("積極", use_container_width=True):
+        st.session_state.base_threshold = 0.48
+        st.session_state.strictness_multiplier = 1.05
+        st.session_state.regime_preset = "積極"
+
+    if regime_mode == "進階模式":
+        st.slider(
+            "基準信心閾值",
+            min_value=0.45,
+            max_value=0.75,
+            step=0.01,
+            key="base_threshold",
+        )
+        st.slider(
+            "高波動嚴格倍數",
+            min_value=1.0,
+            max_value=1.4,
+            step=0.05,
+            key="strictness_multiplier",
+        )
+    else:
+        st.info(
+            f"目前使用 {st.session_state.regime_preset} 預設："
+            f"基準閾值 {st.session_state.base_threshold:.2f} / "
+            f"高波動倍數 {st.session_state.strictness_multiplier:.2f}"
+        )
+
+    base_threshold = float(st.session_state.base_threshold)
+    strictness_multiplier = float(st.session_state.strictness_multiplier)
 
     st.divider()
     run_btn = st.button("🚀 開始下載 & 訓練", use_container_width=True)
