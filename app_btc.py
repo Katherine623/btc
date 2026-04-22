@@ -494,7 +494,7 @@ def infer_next_signal(model, df: pd.DataFrame, feature_cols: list, current_regim
     dist = model.policy.get_distribution(obs_tensor)
     probs = dist.distribution.probs.detach().cpu().numpy()[0]
 
-    action_idx = int(action)
+    action_idx = int(np.asarray(action).reshape(-1)[0])
     action_map = {0: "Hold", 1: "Buy", 2: "Sell"}
 
     regime_thresholds = get_regime_thresholds(current_regime, base_threshold, strictness_multiplier)
