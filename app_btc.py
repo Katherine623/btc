@@ -94,20 +94,36 @@ MODEL_PATH = "ppo_btc_trading_agent"
 
 def load_or_download_data() -> pd.DataFrame:
     if data_source == "上傳 CSV 檔案" and uploaded_file is not None:
-        df_raw = pd.read_csv(uploaded_file)
+        try:
+            df_raw = pd.read_csv(uploaded_file)
+        except Exception as e:
+            st.error(f"❌ CSV 讀取失敗：{str(e)}")
+            st.stop()
     elif data_source == "從 yfinance 下載":
-        with st.spinner("正在從 yfinance 下載 BTC 資料..."):
-            df_raw = download_btc_data(
-                symbol="BTC-USD",
-                interval=yf_interval,
-                period=yf_period,
-                save_path=CSV_PATH,
+        try:
+            with st.spinner("正在從 yfinance 下載 BTC 資料...（可能需要 10-30 秒）"):
+                df_raw = download_btc_data(
+                    symbol="BTC-USD",
+                    interval=yf_interval,
+                    period=yf_period,
+                    save_path=CSV_PATH,
+                    max_retries=3,
+                )
+        except Exception as e:
+            st.error(
+                f"❌ yfinance 下載失敗。\n\n"
+                f"**原因：** {str(e)}\n\n"
+                f"**建議：**\n"
+                f"1. 等待 1-2 分鐘後再試（API 限流）\n"
+                f"2. 改用「上傳 CSV 檔案」方式\n"
+                f"3. 使用更短的時間週期（例如 1y 而非 max）"
             )
+            st.stop()
     elif os.path.exists(CSV_PATH):
         df_raw = pd.read_csv(CSV_PATH)
-        st.info(f"讀取已存在的資料檔：{CSV_PATH}")
+        st.info(f"✓ 讀取已存在的資料檔：{CSV_PATH}（{len(df_raw)} 筆）")
     else:
-        st.error("請選擇資料來源或上傳 CSV 後再執行。")
+        st.error("❌ 請選擇資料來源或上傳 CSV 後再執行。")
         st.stop()
 
     return df_raw
@@ -169,101 +185,108 @@ def plot_price_with_signals(test_df, action_history):
 # 執行
 # ──────────────────────────────────────────────
 if run_btn:
-    # 1) 資料
-    df_raw = load_or_download_data()
+    try:
+        # 1) 資料
+        df_raw = load_or_download_data()
 
-    with st.spinner("計算技術指標..."):
-        df = add_technical_indicators(df_raw)
-    feature_cols = build_feature_columns()
+        with st.spinner("計算技術指標..."):
+            df = add_technical_indicators(df_raw)
+        feature_cols = build_feature_columns()
 
-    # 2) 切分
-    split_idx = int(len(df) * train_split)
-    train_df = df.iloc[:split_idx].reset_index(drop=True)
-    test_df  = df.iloc[split_idx:].reset_index(drop=True)
+        # 2) 切分
+        split_idx = int(len(df) * train_split)
+        train_df = df.iloc[:split_idx].reset_index(drop=True)
+        test_df  = df.iloc[split_idx:].reset_index(drop=True)
 
-    col1, col2, col3 = st.columns(3)
-    col1.metric("總資料筆數", len(df))
-    col2.metric("訓練集", len(train_df))
-    col3.metric("測試集", len(test_df))
+        col1, col2, col3 = st.columns(3)
+        col1.metric("總資料筆數", len(df))
+        col2.metric("訓練集", len(train_df))
+        col3.metric("測試集", len(test_df))
 
-    # 3) 訓練環境
-    def make_train_env():
-        return BitcoinTradingEnv(
-            df=train_df,
+        # 3) 訓練環境
+        def make_train_env():
+            return BitcoinTradingEnv(
+                df=train_df,
+                feature_cols=feature_cols,
+                initial_balance=float(initial_balance),
+                trade_fee=trade_fee,
+            )
+
+        train_env = DummyVecEnv([make_train_env])
+
+        # 4) 訓練 PPO
+        with st.spinner(f"訓練 PPO 模型中（{total_timesteps:,} 步）..."):
+            model = PPO(
+                policy="MlpPolicy",
+                env=train_env,
+                learning_rate=3e-4,
+                n_steps=2048,
+                batch_size=64,
+                n_epochs=10,
+                gamma=0.99,
+                gae_lambda=0.95,
+                clip_range=0.2,
+                ent_coef=0.01,
+                verbose=0,
+                device="auto",
+            )
+            model.learn(total_timesteps=total_timesteps)
+            model.save(MODEL_PATH)
+
+        st.success(f"✅ 模型訓練完成，已儲存為 `{MODEL_PATH}.zip`")
+
+        # 5) 測試評估
+        test_env = BitcoinTradingEnv(
+            df=test_df,
             feature_cols=feature_cols,
             initial_balance=float(initial_balance),
             trade_fee=trade_fee,
         )
+        metrics, equity_curve, action_history = evaluate_agent(model, test_env)
 
-    train_env = DummyVecEnv([make_train_env])
+        # Buy & Hold baseline
+        test_prices = test_df["Close"].values
+        buy_hold_curve = float(initial_balance) * (test_prices / test_prices[0])
 
-    # 4) 訓練 PPO
-    with st.spinner(f"訓練 PPO 模型中（{total_timesteps:,} 步）..."):
-        model = PPO(
-            policy="MlpPolicy",
-            env=train_env,
-            learning_rate=3e-4,
-            n_steps=2048,
-            batch_size=64,
-            n_epochs=10,
-            gamma=0.99,
-            gae_lambda=0.95,
-            clip_range=0.2,
-            ent_coef=0.01,
-            verbose=0,
-            device="auto",
-        )
-        model.learn(total_timesteps=total_timesteps)
-        model.save(MODEL_PATH)
+        # 6) 指標顯示
+        st.subheader("📊 測試集績效指標")
+        m1, m2, m3, m4 = st.columns(4)
+        cr  = metrics["cumulative_return"]
+        bh_cr = (buy_hold_curve[len(equity_curve) - 1] / float(initial_balance)) - 1.0
+        m1.metric("累積報酬率（RL）",  f"{cr * 100:.2f} %", delta=f"{(cr - bh_cr) * 100:.2f} % vs B&H")
+        m2.metric("Sharpe Ratio",       f"{metrics['sharpe_ratio']:.3f}")
+        m3.metric("最大回撤",            f"{metrics['max_drawdown'] * 100:.2f} %")
+        m4.metric("最終資產（USD）",     f"{equity_curve[-1]:,.2f}")
 
-    st.success(f"✅ 模型訓練完成，已儲存為 `{MODEL_PATH}.zip`")
+        # 7) 圖表
+        st.subheader("📈 資產曲線")
+        st.pyplot(plot_equity_curve(equity_curve, buy_hold_curve))
 
-    # 5) 測試評估
-    test_env = BitcoinTradingEnv(
-        df=test_df,
-        feature_cols=feature_cols,
-        initial_balance=float(initial_balance),
-        trade_fee=trade_fee,
-    )
-    metrics, equity_curve, action_history = evaluate_agent(model, test_env)
+        st.subheader("🔔 交易訊號")
+        st.pyplot(plot_price_with_signals(test_df, action_history))
 
-    # Buy & Hold baseline
-    test_prices = test_df["Close"].values
-    buy_hold_curve = float(initial_balance) * (test_prices / test_prices[0])
+        col_a, col_b = st.columns(2)
+        with col_a:
+            st.subheader("🎯 動作分佈")
+            st.pyplot(plot_action_distribution(action_history))
 
-    # 6) 指標顯示
-    st.subheader("📊 測試集績效指標")
-    m1, m2, m3, m4 = st.columns(4)
-    cr  = metrics["cumulative_return"]
-    bh_cr = (buy_hold_curve[len(equity_curve) - 1] / float(initial_balance)) - 1.0
-    m1.metric("累積報酬率（RL）",  f"{cr * 100:.2f} %", delta=f"{(cr - bh_cr) * 100:.2f} % vs B&H")
-    m2.metric("Sharpe Ratio",       f"{metrics['sharpe_ratio']:.3f}")
-    m3.metric("最大回撤",            f"{metrics['max_drawdown'] * 100:.2f} %")
-    m4.metric("最終資產（USD）",     f"{equity_curve[-1]:,.2f}")
+        with col_b:
+            st.subheader("📉 資產曲線（資料）")
+            eq_df = pd.DataFrame({
+                "RL Agent": equity_curve,
+                "Buy & Hold": buy_hold_curve[: len(equity_curve)],
+            })
+            st.line_chart(eq_df)
 
-    # 7) 圖表
-    st.subheader("📈 資產曲線")
-    st.pyplot(plot_equity_curve(equity_curve, buy_hold_curve))
+        # 8) 訓練資料摘要
+        with st.expander("📋 原始資料摘要"):
+            st.dataframe(df_raw.tail(50), use_container_width=True)
 
-    st.subheader("🔔 交易訊號")
-    st.pyplot(plot_price_with_signals(test_df, action_history))
-
-    col_a, col_b = st.columns(2)
-    with col_a:
-        st.subheader("🎯 動作分佈")
-        st.pyplot(plot_action_distribution(action_history))
-
-    with col_b:
-        st.subheader("📉 資產曲線（資料）")
-        eq_df = pd.DataFrame({
-            "RL Agent": equity_curve,
-            "Buy & Hold": buy_hold_curve[: len(equity_curve)],
-        })
-        st.line_chart(eq_df)
-
-    # 8) 訓練資料摘要
-    with st.expander("📋 原始資料摘要"):
-        st.dataframe(df_raw.tail(50), use_container_width=True)
+    except Exception as e:
+        st.error(f"❌ 發生錯誤：\n\n`{str(e)}`\n\n請檢查參數或資料後重新嘗試。")
+        import traceback
+        with st.expander("🔧 詳細錯誤訊息"):
+            st.code(traceback.format_exc())
 
 else:
     # 說明頁

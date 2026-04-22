@@ -23,9 +23,10 @@ def download_btc_data(
     interval: str = "1h",
     period: str = "2y",
     save_path: str = "btc_usdt_1h.csv",
+    max_retries: int = 3,
 ) -> pd.DataFrame:
     """
-    使用 yfinance 下載 BTC 歷史資料並儲存為 CSV。
+    使用 yfinance 下載 BTC 歷史資料並儲存為 CSV（含重試機制）。
     interval: 1m,2m,5m,15m,30m,60m,90m,1h,1d,5d,1wk,1mo,3mo
     period:   1d,5d,1mo,3mo,6mo,1y,2y,5y,10y,ytd,max
     """
@@ -34,22 +35,35 @@ def download_btc_data(
     except ImportError as exc:
         raise ImportError("請先安裝 yfinance：pip install yfinance") from exc
 
-    ticker = yf.Ticker(symbol)
-    df = ticker.history(period=period, interval=interval)
+    import time
 
-    if df.empty:
-        raise ValueError(f"yfinance 無法取得 {symbol} 的資料，請確認 symbol 與參數。")
+    for attempt in range(max_retries):
+        try:
+            ticker = yf.Ticker(symbol)
+            df = ticker.history(period=period, interval=interval)
 
-    df = df.reset_index()
-    df = df.rename(columns={"Datetime": "Datetime", "Date": "Datetime"})
+            if df.empty:
+                raise ValueError(f"yfinance 無法取得 {symbol} 的資料，請確認 symbol 與參數。")
 
-    # 保留需要的欄位
-    keep_cols = ["Datetime", "Open", "High", "Low", "Close", "Volume"]
-    df = df[[c for c in keep_cols if c in df.columns]]
+            df = df.reset_index()
+            df = df.rename(columns={"Datetime": "Datetime", "Date": "Datetime"})
 
-    df.to_csv(save_path, index=False)
-    print(f"資料已儲存至 {save_path}，共 {len(df)} 筆")
-    return df
+            # 保留需要的欄位
+            keep_cols = ["Datetime", "Open", "High", "Low", "Close", "Volume"]
+            df = df[[c for c in keep_cols if c in df.columns]]
+
+            df.to_csv(save_path, index=False)
+            print(f"資料已儲存至 {save_path}，共 {len(df)} 筆")
+            return df
+
+        except Exception as e:
+            if attempt < max_retries - 1:
+                wait_time = 2 ** attempt  # 指數退避：1, 2, 4 秒
+                print(f"下載失敗（嘗試 {attempt + 1}/{max_retries}）：{str(e)[:100]}")
+                print(f"等待 {wait_time} 秒後重試...")
+                time.sleep(wait_time)
+            else:
+                raise Exception(f"下載 {symbol} 失敗（嘗試 {max_retries} 次）：{str(e)}") from e
 
 
 def load_data(csv_path: str) -> pd.DataFrame:
