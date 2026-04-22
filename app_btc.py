@@ -88,9 +88,18 @@ with st.sidebar:
     defaults = {
         "slippage_bps": 8.0,
         "spread_bps": 4.0,
+        "maker_fee": 0.0002,
+        "taker_fee": 0.0007,
         "min_trade_pct": 0.02,
+        "min_notional": 10.0,
+        "min_qty": 0.0001,
+        "qty_step": 0.0001,
+        "price_step": 0.01,
         "position_step": 0.25,
         "slippage_vol_multiplier": 1.2,
+        "max_drawdown_limit": 0.30,
+        "daily_loss_limit": 0.06,
+        "volatility_target": 0.02,
         "wf_train_window": 360,
         "wf_test_window": 120,
         "wf_max_folds": 5,
@@ -152,9 +161,21 @@ with st.sidebar:
         st.subheader("🏦 現實市場設定")
         st.session_state.slippage_bps = st.slider("基礎滑價（bps）", min_value=0.0, max_value=30.0, value=float(st.session_state.slippage_bps), step=1.0)
         st.session_state.spread_bps = st.slider("買賣價差（bps）", min_value=0.0, max_value=20.0, value=float(st.session_state.spread_bps), step=1.0)
+        st.session_state.maker_fee = st.slider("Maker 費率", min_value=0.0, max_value=0.0020, value=float(st.session_state.maker_fee), step=0.0001, format="%.4f")
+        st.session_state.taker_fee = st.slider("Taker 費率", min_value=0.0, max_value=0.0030, value=float(st.session_state.taker_fee), step=0.0001, format="%.4f")
         st.session_state.min_trade_pct = st.slider("最小成交比例", min_value=0.0, max_value=0.10, value=float(st.session_state.min_trade_pct), step=0.005)
+        st.session_state.min_notional = st.number_input("最小名目金額（USD）", min_value=1.0, value=float(st.session_state.min_notional), step=1.0)
+        st.session_state.min_qty = st.number_input("最小下單數量（BTC）", min_value=0.00001, value=float(st.session_state.min_qty), step=0.00001, format="%.5f")
+        st.session_state.qty_step = st.number_input("下單數量精度步進", min_value=0.00001, value=float(st.session_state.qty_step), step=0.00001, format="%.5f")
+        st.session_state.price_step = st.number_input("價格精度步進", min_value=0.01, value=float(st.session_state.price_step), step=0.01)
         st.session_state.position_step = st.select_slider("單次調倉步長", options=[0.10, 0.20, 0.25, 0.33, 0.50], value=float(st.session_state.position_step))
         st.session_state.slippage_vol_multiplier = st.slider("高波動滑價放大倍數", min_value=0.0, max_value=3.0, value=float(st.session_state.slippage_vol_multiplier), step=0.1)
+        st.session_state.volatility_target = st.slider("波動目標（風險縮放）", min_value=0.005, max_value=0.05, value=float(st.session_state.volatility_target), step=0.001, format="%.3f")
+
+        st.divider()
+        st.subheader("🛑 風險引擎")
+        st.session_state.max_drawdown_limit = st.slider("最大回撤停機線", min_value=0.10, max_value=0.60, value=float(st.session_state.max_drawdown_limit), step=0.01)
+        st.session_state.daily_loss_limit = st.slider("單次回測虧損停機線", min_value=0.02, max_value=0.30, value=float(st.session_state.daily_loss_limit), step=0.01)
 
         st.divider()
         st.subheader("🧪 Walk-forward 回測")
@@ -190,9 +211,18 @@ with st.sidebar:
 
     slippage_bps = float(st.session_state.slippage_bps)
     spread_bps = float(st.session_state.spread_bps)
+    maker_fee = float(st.session_state.maker_fee)
+    taker_fee = float(st.session_state.taker_fee)
     min_trade_pct = float(st.session_state.min_trade_pct)
+    min_notional = float(st.session_state.min_notional)
+    min_qty = float(st.session_state.min_qty)
+    qty_step = float(st.session_state.qty_step)
+    price_step = float(st.session_state.price_step)
     position_step = float(st.session_state.position_step)
     slippage_vol_multiplier = float(st.session_state.slippage_vol_multiplier)
+    max_drawdown_limit = float(st.session_state.max_drawdown_limit)
+    daily_loss_limit = float(st.session_state.daily_loss_limit)
+    volatility_target = float(st.session_state.volatility_target)
 
     enable_walk_forward = bool(st.session_state.enable_walk_forward)
     wf_train_window = int(st.session_state.wf_train_window)
@@ -475,9 +505,18 @@ def run_walk_forward_backtest(
     timesteps_per_fold: int,
     slippage_bps: float,
     spread_bps: float,
+    maker_fee: float,
+    taker_fee: float,
     min_trade_pct: float,
+    min_notional: float,
+    min_qty: float,
+    qty_step: float,
+    price_step: float,
     position_step: float,
     slippage_vol_multiplier: float,
+    max_drawdown_limit: float,
+    daily_loss_limit: float,
+    volatility_target: float,
 ):
     rows = []
     fold = 0
@@ -496,9 +535,18 @@ def run_walk_forward_backtest(
                 trade_fee=trade_fee,
                 slippage_bps=slippage_bps,
                 spread_bps=spread_bps,
+                maker_fee=maker_fee,
+                taker_fee=taker_fee,
                 min_trade_pct=min_trade_pct,
+                min_notional=min_notional,
+                min_qty=min_qty,
+                qty_step=qty_step,
+                price_step=price_step,
                 position_step=position_step,
                 slippage_vol_multiplier=slippage_vol_multiplier,
+                max_drawdown_limit=max_drawdown_limit,
+                daily_loss_limit=daily_loss_limit,
+                volatility_target=volatility_target,
             )
 
         train_env = DummyVecEnv([make_train_env])
@@ -526,12 +574,21 @@ def run_walk_forward_backtest(
             trade_fee=trade_fee,
             slippage_bps=slippage_bps,
             spread_bps=spread_bps,
+            maker_fee=maker_fee,
+            taker_fee=taker_fee,
             min_trade_pct=min_trade_pct,
+            min_notional=min_notional,
+            min_qty=min_qty,
+            qty_step=qty_step,
+            price_step=price_step,
             position_step=position_step,
             slippage_vol_multiplier=slippage_vol_multiplier,
+            max_drawdown_limit=max_drawdown_limit,
+            daily_loss_limit=daily_loss_limit,
+            volatility_target=volatility_target,
         )
 
-        metrics, equity_curve, action_history = evaluate_agent(model, test_env)
+        metrics, equity_curve, action_history, _ = evaluate_agent(model, test_env)
         adv = compute_advanced_metrics(equity_curve, action_history)
 
         rows.append(
@@ -560,9 +617,18 @@ def run_cost_stress_test(
     trade_fee: float,
     slippage_bps: float,
     spread_bps: float,
+    maker_fee: float,
+    taker_fee: float,
     min_trade_pct: float,
+    min_notional: float,
+    min_qty: float,
+    qty_step: float,
+    price_step: float,
     position_step: float,
     slippage_vol_multiplier: float,
+    max_drawdown_limit: float,
+    daily_loss_limit: float,
+    volatility_target: float,
 ):
     scenarios = [
         ("Base", trade_fee, slippage_bps, spread_bps),
@@ -580,11 +646,20 @@ def run_cost_stress_test(
             trade_fee=float(fee),
             slippage_bps=float(slip),
             spread_bps=float(spr),
+            maker_fee=maker_fee,
+            taker_fee=taker_fee,
             min_trade_pct=min_trade_pct,
+            min_notional=min_notional,
+            min_qty=min_qty,
+            qty_step=qty_step,
+            price_step=price_step,
             position_step=position_step,
             slippage_vol_multiplier=slippage_vol_multiplier,
+            max_drawdown_limit=max_drawdown_limit,
+            daily_loss_limit=daily_loss_limit,
+            volatility_target=volatility_target,
         )
-        metrics, equity_curve, _ = evaluate_agent(model, env)
+        metrics, equity_curve, _, _ = evaluate_agent(model, env)
         rows.append(
             {
                 "Scenario": name,
@@ -630,9 +705,18 @@ if run_btn:
                 trade_fee=trade_fee,
                 slippage_bps=slippage_bps,
                 spread_bps=spread_bps,
+                maker_fee=maker_fee,
+                taker_fee=taker_fee,
                 min_trade_pct=min_trade_pct,
+                min_notional=min_notional,
+                min_qty=min_qty,
+                qty_step=qty_step,
+                price_step=price_step,
                 position_step=float(position_step),
                 slippage_vol_multiplier=slippage_vol_multiplier,
+                max_drawdown_limit=max_drawdown_limit,
+                daily_loss_limit=daily_loss_limit,
+                volatility_target=volatility_target,
             )
 
         train_env = DummyVecEnv([make_train_env])
@@ -673,11 +757,20 @@ if run_btn:
             trade_fee=trade_fee,
             slippage_bps=slippage_bps,
             spread_bps=spread_bps,
+            maker_fee=maker_fee,
+            taker_fee=taker_fee,
             min_trade_pct=min_trade_pct,
+            min_notional=min_notional,
+            min_qty=min_qty,
+            qty_step=qty_step,
+            price_step=price_step,
             position_step=float(position_step),
             slippage_vol_multiplier=slippage_vol_multiplier,
+            max_drawdown_limit=max_drawdown_limit,
+            daily_loss_limit=daily_loss_limit,
+            volatility_target=volatility_target,
         )
-        metrics, equity_curve, action_history = evaluate_agent(model, test_env)
+        metrics, equity_curve, action_history, trade_log = evaluate_agent(model, test_env)
 
         stress_df = run_cost_stress_test(
             model=model,
@@ -687,9 +780,18 @@ if run_btn:
             trade_fee=trade_fee,
             slippage_bps=slippage_bps,
             spread_bps=spread_bps,
+            maker_fee=maker_fee,
+            taker_fee=taker_fee,
             min_trade_pct=min_trade_pct,
+            min_notional=min_notional,
+            min_qty=min_qty,
+            qty_step=qty_step,
+            price_step=price_step,
             position_step=float(position_step),
             slippage_vol_multiplier=slippage_vol_multiplier,
+            max_drawdown_limit=max_drawdown_limit,
+            daily_loss_limit=daily_loss_limit,
+            volatility_target=volatility_target,
         )
 
         # Buy & Hold baseline
@@ -758,6 +860,15 @@ if run_btn:
         stress_chart = stress_df.set_index("Scenario")[["FinalNetWorth"]]
         st.bar_chart(stress_chart)
 
+        st.subheader("🧾 交易執行日誌")
+        if len(trade_log) > 0:
+            trade_df = pd.DataFrame(trade_log)
+            st.dataframe(trade_df.tail(100), use_container_width=True)
+            exec_mix = trade_df["execution"].value_counts().rename_axis("Execution").to_frame("Count")
+            st.bar_chart(exec_mix)
+        else:
+            st.info("本次測試無成交紀錄（可能被風險或門檻過濾）。")
+
         if yf_interval == "1d":
             st.info("此訊號對應下一根日線（可視為明日建議）。")
         else:
@@ -802,9 +913,18 @@ if run_btn:
                     timesteps_per_fold=int(wf_timesteps),
                     slippage_bps=slippage_bps,
                     spread_bps=spread_bps,
+                    maker_fee=maker_fee,
+                    taker_fee=taker_fee,
                     min_trade_pct=min_trade_pct,
+                    min_notional=min_notional,
+                    min_qty=min_qty,
+                    qty_step=qty_step,
+                    price_step=price_step,
                     position_step=float(position_step),
                     slippage_vol_multiplier=slippage_vol_multiplier,
+                    max_drawdown_limit=max_drawdown_limit,
+                    daily_loss_limit=daily_loss_limit,
+                    volatility_target=volatility_target,
                 )
 
             if not wf_df.empty:

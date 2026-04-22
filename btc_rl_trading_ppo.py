@@ -188,11 +188,20 @@ class BitcoinTradingEnv(gym.Env):
         feature_cols: list,
         initial_balance: float = 10000.0,
         trade_fee: float = 0.001,      # 0.1%
+        maker_fee: float = 0.0002,
+        taker_fee: float = 0.0007,
         slippage_bps: float = 8.0,
         spread_bps: float = 4.0,
         min_trade_pct: float = 0.02,
         position_step: float = 0.25,
         slippage_vol_multiplier: float = 1.2,
+        min_notional: float = 10.0,
+        min_qty: float = 0.0001,
+        qty_step: float = 0.0001,
+        price_step: float = 0.01,
+        max_drawdown_limit: float = 0.30,
+        daily_loss_limit: float = 0.06,
+        volatility_target: float = 0.02,
         window_size: int = 1,
     ):
         super().__init__()
@@ -201,11 +210,20 @@ class BitcoinTradingEnv(gym.Env):
         self.feature_cols = feature_cols
         self.initial_balance = initial_balance
         self.trade_fee = trade_fee
+        self.maker_fee = maker_fee
+        self.taker_fee = taker_fee
         self.slippage_bps = slippage_bps
         self.spread_bps = spread_bps
         self.min_trade_pct = min_trade_pct
         self.position_step = position_step
         self.slippage_vol_multiplier = slippage_vol_multiplier
+        self.min_notional = min_notional
+        self.min_qty = min_qty
+        self.qty_step = qty_step
+        self.price_step = price_step
+        self.max_drawdown_limit = max_drawdown_limit
+        self.daily_loss_limit = daily_loss_limit
+        self.volatility_target = volatility_target
         self.window_size = window_size
 
         self.prices = self.df["Close"].values.astype(np.float32)
@@ -256,10 +274,12 @@ class BitcoinTradingEnv(gym.Env):
         self.net_worth = float(self.initial_balance)
         self.prev_net_worth = float(self.initial_balance)
         self.peak_net_worth = float(self.initial_balance)
+        self.episode_start_net_worth = float(self.initial_balance)
 
         self.net_worth_history = [self.net_worth]
         self.action_history = []
         self.turnover_history = [0.0]
+        self.trade_log = []
 
         obs = self._get_observation()
         info = {}
@@ -267,13 +287,16 @@ class BitcoinTradingEnv(gym.Env):
 
     def step(self, action):
         action = int(action)
-        price = float(self.prices[self.current_step])
+        raw_price = float(self.prices[self.current_step])
+        price = np.floor(raw_price / self.price_step) * self.price_step if self.price_step > 0 else raw_price
         vol_now = float(self.volatility_series[self.current_step])
 
         current_notional = self.btc_units * price
         old_net_worth = self.balance + current_notional
         executed_trade = False
         executed_notional = 0.0
+        execution_type = "none"
+        trade_cost_rate = 0.0
 
         # action handling
         target_position = self.position
@@ -282,6 +305,11 @@ class BitcoinTradingEnv(gym.Env):
         elif action == 2:
             target_position = max(0.0, self.position - self.position_step)
 
+        # Volatility targeting reduces position when volatility spikes.
+        vol_scale_target = self.volatility_target / (vol_now + 1e-8) if vol_now > 0 else 1.0
+        risk_scale = float(np.clip(vol_scale_target, 0.25, 1.0))
+        target_position = float(np.clip(target_position * risk_scale, 0.0, 1.0))
+
         target_notional = target_position * old_net_worth
         trade_notional = target_notional - current_notional
         min_notional = self.min_trade_pct * old_net_worth
@@ -289,24 +317,40 @@ class BitcoinTradingEnv(gym.Env):
         vol_scale = vol_now / self.vol_median
         dynamic_slippage = (self.slippage_bps / 10000.0) * (1.0 + self.slippage_vol_multiplier * vol_scale)
         spread_cost = (self.spread_bps / 10000.0) * 0.5
-        total_cost_rate = self.trade_fee + dynamic_slippage + spread_cost
+        maker_vs_taker_score = min(1.0, abs(trade_notional) / (old_net_worth + 1e-8))
+        maker_weight = float(np.clip(1.0 - maker_vs_taker_score * 2.0, 0.0, 1.0))
+        execution_fee = maker_weight * self.maker_fee + (1.0 - maker_weight) * self.taker_fee
+        execution_type = "maker" if maker_weight >= 0.5 else "taker"
+        total_cost_rate = self.trade_fee + execution_fee + dynamic_slippage + spread_cost
+        trade_cost_rate = total_cost_rate
 
-        if abs(trade_notional) >= min_notional:
+        if abs(trade_notional) >= max(min_notional, self.min_notional):
             if trade_notional > 0:
                 max_affordable = self.balance / (1.0 + total_cost_rate)
                 buy_notional = min(trade_notional, max_affordable)
                 if buy_notional > 0:
-                    self.btc_units += buy_notional / price
-                    self.balance -= buy_notional * (1.0 + total_cost_rate)
-                    executed_notional = buy_notional
-                    executed_trade = True
+                    buy_qty = buy_notional / price
+                    if self.qty_step > 0:
+                        buy_qty = np.floor(buy_qty / self.qty_step) * self.qty_step
+                    if buy_qty >= self.min_qty:
+                        exec_notional = buy_qty * price
+                        self.btc_units += buy_qty
+                        self.balance -= exec_notional * (1.0 + total_cost_rate)
+                        executed_notional = exec_notional
+                        executed_trade = exec_notional >= self.min_notional
             else:
                 sell_notional = min(-trade_notional, current_notional)
                 if sell_notional > 0:
-                    self.btc_units -= sell_notional / price
-                    self.balance += sell_notional * (1.0 - total_cost_rate)
-                    executed_notional = sell_notional
-                    executed_trade = True
+                    sell_qty = sell_notional / price
+                    if self.qty_step > 0:
+                        sell_qty = np.floor(sell_qty / self.qty_step) * self.qty_step
+                    sell_qty = min(sell_qty, self.btc_units)
+                    if sell_qty >= self.min_qty:
+                        exec_notional = sell_qty * price
+                        self.btc_units -= sell_qty
+                        self.balance += exec_notional * (1.0 - total_cost_rate)
+                        executed_notional = exec_notional
+                        executed_trade = exec_notional >= self.min_notional
 
         current_notional = self.btc_units * price
         self.net_worth = self.balance + current_notional
@@ -320,8 +364,29 @@ class BitcoinTradingEnv(gym.Env):
         drawdown_penalty = 0.06 * drawdown
         turnover_ratio = executed_notional / (old_net_worth + 1e-8)
         turnover_penalty = 0.0015 * turnover_ratio
+        day_loss = max(0.0, (self.episode_start_net_worth - self.net_worth) / (self.episode_start_net_worth + 1e-8))
+        risk_breached = drawdown >= self.max_drawdown_limit or day_loss >= self.daily_loss_limit
+        risk_breach_penalty = 0.02 if risk_breached else 0.0
 
-        reward = portfolio_change - drawdown_penalty - turnover_penalty
+        reward = portfolio_change - drawdown_penalty - turnover_penalty - risk_breach_penalty
+
+        if executed_trade:
+            dt_value = ""
+            if "Datetime" in self.df.columns:
+                dt_value = str(self.df.loc[self.current_step, "Datetime"])
+            self.trade_log.append(
+                {
+                    "step": int(self.current_step),
+                    "datetime": dt_value,
+                    "action": int(action),
+                    "execution": execution_type,
+                    "price": float(price),
+                    "notional": float(executed_notional),
+                    "cost_rate": float(trade_cost_rate),
+                    "position": float(self.position),
+                    "net_worth": float(self.net_worth),
+                }
+            )
 
         self.action_history.append(action)
         self.net_worth_history.append(self.net_worth)
@@ -329,7 +394,7 @@ class BitcoinTradingEnv(gym.Env):
 
         self.current_step += 1
 
-        terminated = self.current_step >= len(self.df) - 1
+        terminated = self.current_step >= len(self.df) - 1 or risk_breached
         truncated = False
 
         obs = self._get_observation() if not terminated else np.zeros_like(self._get_observation(), dtype=np.float32)
@@ -341,6 +406,8 @@ class BitcoinTradingEnv(gym.Env):
             "position": self.position,
             "drawdown": drawdown,
             "turnover": turnover_ratio,
+            "day_loss": day_loss,
+            "risk_breached": risk_breached,
         }
 
         return obs, float(reward), terminated, truncated, info
@@ -390,7 +457,7 @@ def evaluate_agent(model, env: BitcoinTradingEnv):
         obs, reward, done, truncated, info = env.step(action)
 
     metrics = compute_metrics(env.net_worth_history)
-    return metrics, env.net_worth_history, env.action_history
+    return metrics, env.net_worth_history, env.action_history, env.trade_log
 
 
 # =========================================================
@@ -454,13 +521,14 @@ def main():
     model.save("ppo_btc_trading_agent")
 
     # 5) evaluate on test
-    metrics, equity_curve, action_history = evaluate_agent(model, test_env)
+    metrics, equity_curve, action_history, trade_log = evaluate_agent(model, test_env)
 
     print("\n===== Test Metrics =====")
     print(f"Cumulative Return : {metrics['cumulative_return']:.4f}")
     print(f"Sharpe Ratio      : {metrics['sharpe_ratio']:.4f}")
     print(f"Max Drawdown      : {metrics['max_drawdown']:.4f}")
     print(f"Final Net Worth   : {equity_curve[-1]:.2f}")
+    print(f"Executed Trades   : {len(trade_log)}")
 
     # 6) buy-and-hold baseline
     test_prices = test_df["Close"].values
