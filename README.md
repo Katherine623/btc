@@ -19,10 +19,35 @@
 7. 交易執行日誌（可檢視 maker/taker 成交結構）
 8. 速度優化：快速模式、模型重用、資料與特徵快取
 
+## 一頁式 Demo（30 秒看懂）
+
+如果你是老師或評審，建議直接看這 5 點：
+
+1. 問題：做一個「可互動、可回測、含現實交易成本」的 BTC 強化學習系統。
+2. 方法：PPO + 技術指標特徵 + Regime-aware 門檻策略。
+3. 現實性：加入滑價、價差、maker/taker 費率、最小下單規則、風險停機線。
+4. 驗證：除了單次測試，還有成本壓力測試與 Walk-forward 滾動回測。
+5. 可用性：Streamlit 有自動模式（保守/平衡/積極），非技術使用者可直接操作。
+
+### Demo 快速操作
+
+1. 開啟介面：`python -m streamlit run app_btc.py`
+2. 使用自動模式，選「平衡」，按下「開始下載 & 訓練」
+3. 看 4 個區塊：績效指標、下一根訊號、成本壓力測試、交易執行日誌
+4. 若要快：選快速模式 + 載入既有模型
+
+### 建議展示話術（答辯可直接用）
+
+1. 這不是只有訊號圖，而是含交易成本與風險控制的執行層回測。
+2. 模型在不同市場狀態使用不同門檻，不是單一規則硬套全部時段。
+3. 我們額外做成本壓力測試與 Walk-forward，降低單次回測偏誤。
+
 ## 專案結構
 
 ```text
 .
+├── assets/
+│   └── screenshots/
 ├── app_btc.py
 ├── btc_rl_trading_ppo.py
 ├── report.md
@@ -36,6 +61,41 @@
 2. btc_rl_trading_ppo.py：核心環境與訓練流程（特徵工程、交易環境、評估）
 3. report.md：課程報告內容
 4. requirements.txt：部署與安裝依賴
+
+## 成果截圖區塊
+
+請將截圖放在 `assets/screenshots/`，建議檔名如下：
+
+1. hero_overview.png（首頁與核心指標）
+2. equity_curve.png（資產曲線 RL vs Buy&Hold）
+3. signal_chart.png（買賣點與價格圖）
+4. regime_overlay.png（Regime 背景視圖）
+5. stress_test.png（成本壓力測試）
+6. trade_log.png（交易執行日誌）
+
+範例模板（把檔名換成你的實際截圖）：
+
+```markdown
+## 成果截圖
+
+### 1) 系統總覽
+![系統總覽](assets/screenshots/hero_overview.png)
+
+### 2) 資產曲線
+![資產曲線](assets/screenshots/equity_curve.png)
+
+### 3) 交易訊號
+![交易訊號](assets/screenshots/signal_chart.png)
+
+### 4) Regime 背景視圖
+![Regime 背景](assets/screenshots/regime_overlay.png)
+
+### 5) 成本壓力測試
+![壓力測試](assets/screenshots/stress_test.png)
+
+### 6) 交易執行日誌
+![交易日誌](assets/screenshots/trade_log.png)
+```
 
 ## 系統流程
 
