@@ -1,119 +1,161 @@
-# Bitcoin RL Trading with PPO
+# Bitcoin RL Trading with PPO (Realism Enhanced)
 
-這是一個以比特幣交易為主題的強化學習專案，使用 Stable-Baselines3 的 PPO 演算法，訓練代理人根據歷史價格與技術指標進行買入、賣出與持有決策。
+本專案是「比特幣 + 強化學習（PPO）」的完整交易研究系統，重點不是只有訓練出訊號，而是盡可能把回測流程拉近真實市場。
 
-專案同時提供兩種使用方式：
+你可以把它當作：
 
-- 命令列訓練腳本：直接下載資料、訓練模型、評估績效並繪圖
-- Streamlit 互動介面：調整資料來源與訓練參數，視覺化呈現績效與交易訊號
+1. 可互動的課程專題展示系統（Streamlit）
+2. 可重現的研究腳本（Python）
+3. 具備現實交易約束的 RL 回測環境（Gymnasium）
 
-## 專案特色
+## 核心亮點
 
-- 使用 PPO 訓練 Bitcoin 交易代理人
-- 支援從 yfinance 自動下載 BTC-USD 歷史資料
-- 計算多個常見技術指標作為觀察特徵
-- 提供自訂 Gymnasium 交易環境
-- 比較 RL 策略與 Buy and Hold 基準績效
-- 透過 Streamlit 顯示資產曲線、動作分佈與交易訊號
+1. RL 主體使用 Stable-Baselines3 的 PPO
+2. 交易環境含現實約束：滑價、價差、最小下單限制、精度步進
+3. 風險引擎：最大回撤停機、虧損停機、波動目標縮放
+4. Regime-aware 決策：市場狀態標籤 + 不同門檻策略
+5. 成本壓力測試：費率 / 滑價 / 價差情境比較
+6. Walk-forward 滾動回測（可選）
+7. 交易執行日誌（可檢視 maker/taker 成交結構）
+8. 速度優化：快速模式、模型重用、資料與特徵快取
 
-## 專案架構
+## 專案結構
 
 ```text
 .
 ├── app_btc.py
 ├── btc_rl_trading_ppo.py
 ├── report.md
+├── requirements.txt
 └── README.md
 ```
 
-檔案說明：
+檔案用途：
 
-- `btc_rl_trading_ppo.py`：核心訓練程式，包含資料下載、特徵工程、交易環境、PPO 訓練與回測
-- `app_btc.py`：Streamlit 互動介面，可直接操作資料下載、訓練與視覺化
-- `report.md`：課堂專題報告草稿
-- `README.md`：專案說明文件
+1. app_btc.py：Streamlit 互動介面（訓練、推論、視覺化、壓力測試、Walk-forward）
+2. btc_rl_trading_ppo.py：核心環境與訓練流程（特徵工程、交易環境、評估）
+3. report.md：課程報告內容
+4. requirements.txt：部署與安裝依賴
 
-## 模型流程
+## 系統流程
 
-整體流程如下：
-
-1. 下載或讀取 BTC 歷史資料
-2. 計算技術指標並建立特徵欄位
-3. 將資料切成訓練集與測試集
-4. 在自訂交易環境中訓練 PPO 模型
-5. 使用測試集評估模型績效
-6. 與 Buy and Hold 基準策略比較
+1. 載入資料（yfinance 或 CSV）
+2. 特徵工程（13 個技術指標）
+3. 市場 Regime 標記
+4. 切分訓練/測試資料
+5. 建立現實化交易環境（含成本與風險）
+6. 訓練 PPO 或載入已訓練模型
+7. 測試評估與視覺化
+8. 可選執行成本壓力測試、Walk-forward
 
 ## 特徵工程
 
-目前模型使用以下 13 個特徵：
+使用 13 個特徵：
 
-- `return_1`
-- `ma_5`
-- `ma_10`
-- `ma_20`
-- `volatility_10`
-- `rsi_14`
-- `macd`
-- `macd_signal`
-- `macd_hist`
-- `close_over_ma5`
-- `close_over_ma10`
-- `close_over_ma20`
-- `vol_ratio`
+1. return_1
+2. ma_5
+3. ma_10
+4. ma_20
+5. volatility_10
+6. rsi_14
+7. macd
+8. macd_signal
+9. macd_hist
+10. close_over_ma5
+11. close_over_ma10
+12. close_over_ma20
+13. vol_ratio
 
-這些特徵會在訓練前做標準化，並和代理人本身狀態一起組成 observation。
+特徵會做標準化，再與代理人狀態（持倉比例、資金比例、淨值比例）合併成 observation。
 
-## 交易環境設計
+## 交易環境（現實化版本）
 
-`BitcoinTradingEnv` 為一個離散動作交易環境。
+目前環境不是教學版全倉切換，而是加入更接近實盤的執行限制：
 
-### 動作空間
+### 動作定義
 
-- `0`：Hold
-- `1`：Buy，若目前為現金則全倉買入 BTC
-- `2`：Sell，若目前持有 BTC 則全部賣出
+1. 0 = Hold
+2. 1 = 增加倉位（按 position_step）
+3. 2 = 減少倉位（按 position_step）
 
-### 持倉狀態
+### 成本與成交模型
 
-- `0`：空倉
-- `1`：滿倉持有 BTC
+1. 基礎手續費 trade_fee
+2. Maker/Taker 費率 maker_fee / taker_fee
+3. 滑價 slippage_bps（可隨波動放大）
+4. 價差 spread_bps
+5. 最小成交比例 min_trade_pct
+6. 最小名目金額 min_notional
+7. 最小下單量 min_qty
+8. 數量精度步進 qty_step
+9. 價格精度步進 price_step
 
-### Observation 組成
+### 風險引擎
 
-每一個 observation 由兩部分組成：
+1. 最大回撤停機 max_drawdown_limit
+2. 單次回測虧損停機 daily_loss_limit
+3. 波動目標倉位縮放 volatility_target
 
-- 技術指標特徵
-- 代理人自身狀態
+### Reward（風險感知）
 
-代理人自身狀態包含：
+reward 由以下組成：
 
-- 當前持倉狀態
-- 現金餘額相對初始資金的比例
-- 淨值相對初始資金的比例
+1. 投組變化報酬
+2. 回撤懲罰
+3. 成交量（turnover）懲罰
+4. 風險停機懲罰
 
-### Reward 設計
+這讓模型不只是追求報酬，也會控制風險與過度交易。
 
-reward 使用投資組合淨值變化率表示：
+## Regime-aware 策略
 
-```text
-reward = (current_net_worth - old_net_worth) / old_net_worth
-```
+系統會根據均線、報酬、波動將市場分成：
 
-交易手續費會在買入與賣出時計入，因此 reward 會間接反映交易成本。
+1. bull_trend（多頭趨勢）
+2. bear_trend（空頭趨勢）
+3. range_bound（盤整震盪）
+4. high_volatility（高波動）
 
-## 評估指標
+下一根 K 棒訊號會依 Regime 套不同買賣門檻，並顯示：
 
-測試階段會輸出以下指標：
+1. 原始 PPO 動作
+2. 門檻過濾後建議
+3. Buy/Sell 機率與信心分數
 
-- 累積報酬率 `cumulative_return`
-- 夏普值 `sharpe_ratio`
-- 最大回撤 `max_drawdown`
-- 最終資產淨值 `final net worth`
+## 介面功能（Streamlit）
 
-同時也會與 Buy and Hold 策略進行比較。
+### 使用者模式
 
-## 安裝方式
+1. 自動模式（預設）：
+	- 一鍵選擇 保守 / 平衡 / 積極
+	- 進階參數隱藏，適合快速使用
+2. 進階模式：
+	- 展開所有交易與風險參數
+	- 可跑 Walk-forward 與研究測試
+
+### 主要視覺化
+
+1. 測試集績效指標（報酬、Sharpe、回撤、最終資產）
+2. 資產曲線（RL vs Buy & Hold）
+3. 交易訊號圖（歷史時間軸）
+4. Regime 背景視圖
+5. 動作分佈
+6. 成本壓力測試表與圖
+7. 交易執行日誌（含 execution/cost_rate）
+8. 可選 Walk-forward 每折結果與平均摘要
+
+## 速度優化設計
+
+為了改善雲端等待時間，系統內建：
+
+1. 快速模式 / 完整模式
+2. 優先載入既有模型（跳過訓練）
+3. yfinance 資料快取（cache）
+4. 技術指標快取（cache）
+5. 快速模式資料筆數上限
+6. 快速模式自動略過重任務（如 Walk-forward）
+
+## 安裝
 
 建議使用虛擬環境。
 
@@ -122,7 +164,7 @@ reward = (current_net_worth - old_net_worth) / old_net_worth
 ```powershell
 python -m venv .venv
 .venv\Scripts\activate
-pip install "stable-baselines3[extra]" gymnasium yfinance streamlit matplotlib pandas numpy
+pip install -r requirements.txt
 ```
 
 ### macOS / Linux
@@ -130,103 +172,68 @@ pip install "stable-baselines3[extra]" gymnasium yfinance streamlit matplotlib p
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install "stable-baselines3[extra]" gymnasium yfinance streamlit matplotlib pandas numpy
+pip install -r requirements.txt
 ```
 
 ## 執行方式
 
-### 1. 直接執行訓練腳本
-
-```powershell
-python btc_rl_trading_ppo.py
-```
-
-這個腳本會：
-
-- 預設下載或讀取 `btc_usdt_1h.csv`
-- 建立特徵與環境
-- 訓練 PPO 模型
-- 儲存模型為 `ppo_btc_trading_agent.zip`
-- 顯示測試績效與資產曲線
-
-### 2. 啟動 Streamlit 互動介面
+### 1) 啟動互動介面（推薦）
 
 ```powershell
 python -m streamlit run app_btc.py
 ```
 
-在介面中可以：
+### 2) 執行腳本版
 
-- 選擇從 yfinance 下載資料或上傳 CSV
-- 設定下載期間與 K 棒週期
-- 調整初始資金、手續費、訓練步數與訓練集比例
-- 觀察績效指標、資產曲線與交易訊號
+```powershell
+python btc_rl_trading_ppo.py
+```
 
 ## 資料格式
 
-若使用自備 CSV，需至少包含以下欄位：
+CSV 至少需要欄位：
 
 ```text
 Datetime, Open, High, Low, Close, Volume
 ```
 
-欄位名稱不必完全一致，程式會自動處理常見變形，例如：
+常見欄位別名（datetime/date/timestamp）會自動轉換。
 
-- `datetime`
-- `date`
-- `timestamp`
+## 評估指標
 
-## 主要超參數
+系統目前提供：
 
-PPO 預設訓練參數如下：
+1. Cumulative Return
+2. Sharpe Ratio
+3. Max Drawdown
+4. Sortino Ratio
+5. Calmar Ratio
+6. Trade Count / Trade Density
+7. Cost Stress Test 情境比較
 
-```python
-learning_rate = 3e-4
-n_steps = 2048
-batch_size = 64
-n_epochs = 10
-gamma = 0.99
-gae_lambda = 0.95
-clip_range = 0.2
-ent_coef = 0.01
-```
+## Streamlit Cloud 部署
 
-這些參數目前設計為課堂專題與示範用途，若要提升策略品質，可以進一步進行參數搜尋與回測驗證。
+1. 將專案推到 GitHub
+2. 在 Streamlit Cloud 連接 repo
+3. 主程式設定為 app_btc.py
+4. 確保 requirements.txt 在 repo root
+5. 若首次部署較慢，可先使用快速模式驗證功能
 
-## 輸出結果
+## 實務限制與風險聲明
 
-執行後常見輸出包含：
+即使此版本已加入許多現實因素，仍與真實交易存在差距：
 
-- `btc_usdt_1h.csv`：下載後的 BTC 歷史資料
-- `ppo_btc_trading_agent.zip`：訓練後的 PPO 模型
-- Matplotlib 圖表：命令列模式下顯示資產曲線
-- Streamlit 圖表：網頁模式下顯示績效與交易訊號
+1. 未接入真實交易所撮合簿深度
+2. 未模擬網路延遲與 API 失敗重送
+3. 未含資金費率（永續合約）與借貸成本
+4. 回測不代表未來績效
 
-## 適用情境
+本專案僅供教學、研究與專題展示，不構成投資建議。
 
-這個專案適合：
+## 建議下一步
 
-- 課堂專題展示
-- 強化學習入門實作
-- 金融交易環境建模練習
-- PPO 在時間序列決策問題上的基礎示範
+若要從研究走向準實盤，可優先做：
 
-## 限制與注意事項
-
-- 目前環境僅支援全倉買入與全倉賣出，未支援部分倉位控制
-- reward 設計偏向教學與展示用途，不代表真實交易最佳化目標
-- 未納入滑價、流動性限制與更完整的風險控制
-- 單次結果會受下載資料區間、隨機性與超參數影響
-- 本專案不構成任何投資建議
-
-## 未來可擴充方向
-
-- 納入更多技術指標或鏈上資料
-- 加入部位比例控制與風險管理機制
-- 改用更長期、多商品或多資產配置環境
-- 增加 walk-forward validation 與更完整的回測流程
-- 比較 PPO、DQN、A2C 等不同 RL 方法
-
-## 授權與說明
-
-本專案主要用於學習、研究與課堂展示用途。
+1. Paper trading 管線（即時訊號與訂單流水）
+2. 限價單未成交/部分成交模型
+3. 自動輸出研究報告（CSV + 指標 + 圖表）
