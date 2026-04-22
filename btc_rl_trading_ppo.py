@@ -179,7 +179,7 @@ class BitcoinTradingEnv(gym.Env):
     - 1 = fully invested in BTC
 
     Reward:
-    portfolio value change ratio - trading cost
+    portfolio change - drawdown penalty - turnover penalty
     """
     metadata = {"render_modes": ["human"]}
 
@@ -241,6 +241,7 @@ class BitcoinTradingEnv(gym.Env):
         self.position = 0  # 0 cash, 1 fully long BTC
         self.net_worth = float(self.initial_balance)
         self.prev_net_worth = float(self.initial_balance)
+        self.peak_net_worth = float(self.initial_balance)
 
         self.net_worth_history = [self.net_worth]
         self.action_history = []
@@ -254,6 +255,7 @@ class BitcoinTradingEnv(gym.Env):
         price = float(self.prices[self.current_step])
 
         old_net_worth = self.net_worth
+        executed_trade = False
 
         # action handling
         # 0 = hold
@@ -265,6 +267,7 @@ class BitcoinTradingEnv(gym.Env):
             self.btc_units = spendable / price
             self.balance = 0.0
             self.position = 1
+            executed_trade = True
 
         elif action == 2 and self.position == 1:
             # sell all with fee
@@ -272,6 +275,7 @@ class BitcoinTradingEnv(gym.Env):
             self.balance = proceeds
             self.btc_units = 0.0
             self.position = 0
+            executed_trade = True
 
         # update net worth
         if self.position == 1:
@@ -279,17 +283,15 @@ class BitcoinTradingEnv(gym.Env):
         else:
             self.net_worth = self.balance
 
-        # reward = portfolio change ratio + trading bonus
+        self.peak_net_worth = max(self.peak_net_worth, self.net_worth)
+
+        # reward = portfolio change ratio + risk-aware penalties
         portfolio_change = (self.net_worth - old_net_worth) / (old_net_worth + 1e-8)
-        
-        # add incentive for action variety (avoid always holding)
-        action_bonus = 0.0
-        if action == 1 and self.position == 1:  # just bought
-            action_bonus = 0.02  # small bonus for buying
-        elif action == 2 and self.position == 0:  # just sold
-            action_bonus = 0.02  # small bonus for selling
-        
-        reward = portfolio_change + action_bonus * 0.1
+        drawdown = (self.peak_net_worth - self.net_worth) / (self.peak_net_worth + 1e-8)
+        drawdown_penalty = 0.08 * drawdown
+        turnover_penalty = 0.002 if executed_trade else 0.0
+
+        reward = portfolio_change - drawdown_penalty - turnover_penalty
 
         self.action_history.append(action)
         self.net_worth_history.append(self.net_worth)
@@ -306,6 +308,7 @@ class BitcoinTradingEnv(gym.Env):
             "balance": self.balance,
             "btc_units": self.btc_units,
             "position": self.position,
+            "drawdown": drawdown,
         }
 
         return obs, float(reward), terminated, truncated, info

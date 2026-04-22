@@ -83,6 +83,11 @@ with st.sidebar:
     train_split = st.slider("訓練集比例", min_value=0.5, max_value=0.9, value=0.8, step=0.05)
 
     st.divider()
+    st.subheader("🧠 Regime 門檻控制")
+    base_threshold = st.slider("基準信心閾值", min_value=0.45, max_value=0.75, value=0.55, step=0.01)
+    strictness_multiplier = st.slider("高波動嚴格倍數", min_value=1.0, max_value=1.4, value=1.15, step=0.05)
+
+    st.divider()
     run_btn = st.button("🚀 開始下載 & 訓練", use_container_width=True)
 
 # ──────────────────────────────────────────────
@@ -194,6 +199,76 @@ def plot_price_with_signals(test_df, action_history, time_axis, use_datetime):
     return fig
 
 
+def plot_price_with_regime_overlay(test_df, action_history, time_axis, use_datetime):
+    prices = test_df["Close"].values[: len(action_history)]
+    x = np.array(time_axis[: len(action_history)])
+    regimes = test_df["market_regime"].values[: len(action_history)] if "market_regime" in test_df.columns else None
+
+    buy_steps = [i for i, a in enumerate(action_history) if a == 1]
+    sell_steps = [i for i, a in enumerate(action_history) if a == 2]
+
+    fig, ax = plt.subplots(figsize=(10, 4))
+
+    if regimes is not None and len(regimes) > 0:
+        regime_colors = {
+            "bull_trend": "#dff5e1",
+            "bear_trend": "#f9e0e0",
+            "range_bound": "#eef2f6",
+            "high_volatility": "#fff4d6",
+        }
+        start = 0
+        for i in range(1, len(regimes) + 1):
+            if i == len(regimes) or regimes[i] != regimes[start]:
+                color = regime_colors.get(regimes[start], "#f3f3f3")
+                ax.axvspan(x[start], x[i - 1], color=color, alpha=0.35)
+                start = i
+
+    ax.plot(x, prices, color="gray", linewidth=1, label="Close Price")
+    ax.scatter([x[i] for i in buy_steps], [prices[i] for i in buy_steps], marker="^", color="green", s=60, zorder=5, label="Buy")
+    ax.scatter([x[i] for i in sell_steps], [prices[i] for i in sell_steps], marker="v", color="red", s=60, zorder=5, label="Sell")
+    ax.set_title("Price Chart with Regime Overlay")
+    ax.set_xlabel("Datetime" if use_datetime else "Time Step")
+    ax.set_ylabel("BTC Price (USD)")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    if use_datetime:
+        fig.autofmt_xdate()
+    plt.tight_layout()
+    return fig
+
+
+def compute_advanced_metrics(equity_curve, action_history):
+    equity = np.array(equity_curve, dtype=np.float64)
+    if len(equity) < 3:
+        return {
+            "sortino_ratio": 0.0,
+            "calmar_ratio": 0.0,
+            "trade_count": 0,
+            "trade_density": 0.0,
+        }
+
+    returns = equity[1:] / (equity[:-1] + 1e-8) - 1.0
+    downside = returns[returns < 0]
+    downside_std = downside.std() if len(downside) > 0 else 0.0
+    sortino = np.sqrt(252) * returns.mean() / (downside_std + 1e-8) if downside_std > 1e-12 else 0.0
+
+    cumulative_return = equity[-1] / equity[0] - 1.0
+    running_max = np.maximum.accumulate(equity)
+    drawdown = (equity - running_max) / (running_max + 1e-8)
+    max_drawdown_abs = abs(drawdown.min())
+    calmar = cumulative_return / (max_drawdown_abs + 1e-8)
+
+    trade_count = int(sum(1 for a in action_history if a in (1, 2)))
+    trade_density = trade_count / max(len(action_history), 1)
+
+    return {
+        "sortino_ratio": float(sortino),
+        "calmar_ratio": float(calmar),
+        "trade_count": trade_count,
+        "trade_density": float(trade_density),
+    }
+
+
 def add_market_regime_labels(df: pd.DataFrame) -> pd.DataFrame:
     labeled = df.copy()
     vol = labeled["volatility_10"].fillna(0.0)
@@ -219,18 +294,21 @@ def add_market_regime_labels(df: pd.DataFrame) -> pd.DataFrame:
     return labeled
 
 
-def get_regime_thresholds(regime: str):
+def get_regime_thresholds(regime: str, base_threshold: float, strictness_multiplier: float):
     # Stricter thresholds in noisy markets, looser thresholds in trending markets.
     thresholds = {
-        "bull_trend": {"buy": 0.42, "sell": 0.62},
-        "bear_trend": {"buy": 0.62, "sell": 0.42},
-        "range_bound": {"buy": 0.55, "sell": 0.55},
-        "high_volatility": {"buy": 0.65, "sell": 0.65},
+        "bull_trend": {"buy": max(0.35, base_threshold - 0.10), "sell": min(0.80, base_threshold + 0.08)},
+        "bear_trend": {"buy": min(0.80, base_threshold + 0.08), "sell": max(0.35, base_threshold - 0.10)},
+        "range_bound": {"buy": base_threshold, "sell": base_threshold},
+        "high_volatility": {
+            "buy": min(0.90, base_threshold * strictness_multiplier),
+            "sell": min(0.90, base_threshold * strictness_multiplier),
+        },
     }
-    return thresholds.get(regime, {"buy": 0.55, "sell": 0.55})
+    return thresholds.get(regime, {"buy": base_threshold, "sell": base_threshold})
 
 
-def infer_next_signal(model, df: pd.DataFrame, feature_cols: list, current_regime: str):
+def infer_next_signal(model, df: pd.DataFrame, feature_cols: list, current_regime: str, base_threshold: float, strictness_multiplier: float):
     # Use the latest engineered features plus a neutral portfolio state as next-period input.
     feats = df[feature_cols].values.astype(np.float32)
     feat_mean = feats.mean(axis=0, keepdims=True)
@@ -249,7 +327,7 @@ def infer_next_signal(model, df: pd.DataFrame, feature_cols: list, current_regim
     action_idx = int(action)
     action_map = {0: "Hold", 1: "Buy", 2: "Sell"}
 
-    regime_thresholds = get_regime_thresholds(current_regime)
+    regime_thresholds = get_regime_thresholds(current_regime, base_threshold, strictness_multiplier)
     buy_prob = float(probs[1])
     sell_prob = float(probs[2])
 
@@ -369,7 +447,7 @@ if run_btn:
         st.subheader("🌦️ 目前市場 Regime")
         r1, r2, r3 = st.columns(3)
         r1.metric("Regime", regime_cn)
-        regime_thresholds = get_regime_thresholds(current_regime)
+        regime_thresholds = get_regime_thresholds(current_regime, base_threshold, strictness_multiplier)
         r2.metric("Buy 閾值", f"{regime_thresholds['buy'] * 100:.1f} %")
         r3.metric("Sell 閾值", f"{regime_thresholds['sell'] * 100:.1f} %")
 
@@ -379,6 +457,8 @@ if run_btn:
             df=df,
             feature_cols=feature_cols,
             current_regime=current_regime,
+            base_threshold=base_threshold,
+            strictness_multiplier=strictness_multiplier,
         )
         st.subheader("🔮 下一根 K 棒建議訊號")
         s1, s2, s3, s4 = st.columns(4)
@@ -392,6 +472,15 @@ if run_btn:
             f"Sell>={next_signal['thresholds']['sell'] * 100:.1f}%"
         )
 
+        # 6-2) 進階風險指標
+        adv = compute_advanced_metrics(equity_curve, action_history)
+        st.subheader("🧪 進階風險指標")
+        a1, a2, a3, a4 = st.columns(4)
+        a1.metric("Sortino Ratio", f"{adv['sortino_ratio']:.3f}")
+        a2.metric("Calmar Ratio", f"{adv['calmar_ratio']:.3f}")
+        a3.metric("交易次數", f"{adv['trade_count']}")
+        a4.metric("交易密度", f"{adv['trade_density'] * 100:.1f} %")
+
         if yf_interval == "1d":
             st.info("此訊號對應下一根日線（可視為明日建議）。")
         else:
@@ -403,6 +492,9 @@ if run_btn:
 
         st.subheader("🔔 交易訊號")
         st.pyplot(plot_price_with_signals(test_df, action_history, time_axis, use_datetime))
+
+        st.subheader("🗺️ Regime 背景視圖")
+        st.pyplot(plot_price_with_regime_overlay(test_df, action_history, time_axis, use_datetime))
 
         col_a, col_b = st.columns(2)
         with col_a:
