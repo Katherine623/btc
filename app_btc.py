@@ -83,6 +83,21 @@ with st.sidebar:
     train_split = st.slider("訓練集比例", min_value=0.5, max_value=0.9, value=0.8, step=0.05)
 
     st.divider()
+    st.subheader("⚡ 執行速度")
+    performance_mode = st.radio(
+        "執行模式",
+        ["快速模式", "完整模式"],
+        index=0,
+        horizontal=True,
+    )
+    use_saved_model = st.checkbox("優先載入既有模型（若存在）", value=True)
+    run_stress_test = st.checkbox("啟用成本壓力測試", value=(performance_mode == "完整模式"))
+    if performance_mode == "快速模式":
+        fast_max_bars = st.number_input("快速模式最大資料筆數", min_value=300, max_value=3000, value=900, step=100)
+    else:
+        fast_max_bars = 3000
+
+    st.divider()
 
     # Session defaults for auto/advanced configuration.
     defaults = {
@@ -242,6 +257,22 @@ CSV_PATH = "btc_usdt_1h.csv"
 MODEL_PATH = "ppo_btc_trading_agent"
 
 
+@st.cache_data(ttl=1800, show_spinner=False)
+def fetch_yfinance_cached(interval: str, period: str, csv_path: str) -> pd.DataFrame:
+    return download_btc_data(
+        symbol="BTC-USD",
+        interval=interval,
+        period=period,
+        save_path=csv_path,
+        max_retries=3,
+    )
+
+
+@st.cache_data(show_spinner=False)
+def add_technical_indicators_cached(df: pd.DataFrame) -> pd.DataFrame:
+    return add_technical_indicators(df)
+
+
 def load_or_download_data() -> pd.DataFrame:
     if data_source == "上傳 CSV 檔案" and uploaded_file is not None:
         try:
@@ -252,13 +283,7 @@ def load_or_download_data() -> pd.DataFrame:
     elif data_source == "從 yfinance 下載":
         try:
             with st.spinner("正在從 yfinance 下載 BTC 資料...（可能需要 10-30 秒）"):
-                df_raw = download_btc_data(
-                    symbol="BTC-USD",
-                    interval=yf_interval,
-                    period=yf_period,
-                    save_path=CSV_PATH,
-                    max_retries=3,
-                )
+                df_raw = fetch_yfinance_cached(yf_interval, yf_period, CSV_PATH)
         except Exception as e:
             st.error(
                 f"❌ yfinance 下載失敗。\n\n"
@@ -682,8 +707,13 @@ if run_btn:
         df_raw = load_or_download_data()
 
         with st.spinner("計算技術指標..."):
-            df = add_technical_indicators(df_raw)
+            df = add_technical_indicators_cached(df_raw)
         df = add_market_regime_labels(df)
+
+        if performance_mode == "快速模式" and len(df) > int(fast_max_bars):
+            df = df.iloc[-int(fast_max_bars):].reset_index(drop=True)
+            st.info(f"快速模式已啟用：僅使用最近 {len(df)} 筆資料加速訓練。")
+
         feature_cols = build_feature_columns()
 
         # 2) 切分
@@ -721,31 +751,52 @@ if run_btn:
 
         train_env = DummyVecEnv([make_train_env])
 
+        effective_timesteps = int(total_timesteps)
+        if performance_mode == "快速模式":
+            effective_timesteps = min(effective_timesteps, 50_000)
+
         # 4) 訓練 PPO
-        with st.spinner(f"訓練 PPO 模型中（{total_timesteps:,} 步）..."):
-            # 增大網絡容量以提升學習能力
-            policy_kwargs = dict(
-                net_arch=[256, 256, 128],  # 更深的網絡
-            )
-            
-            model = PPO(
-                policy="MlpPolicy",
-                env=train_env,
-                learning_rate=5e-4,  # 提高學習率以加快收斂
-                n_steps=1024,  # 降低以增加更新頻率
-                batch_size=32,  # 更小的批量以增加梯度更新
-                n_epochs=15,  # 增加 epoch 以更充分利用數據
-                gamma=0.99,
-                gae_lambda=0.95,
-                clip_range=0.2,
-                ent_coef=0.02,  # 增加熵正則化以鼓勵探索
-                verbose=0,
-                device="auto",
-                policy_kwargs=policy_kwargs,
-                seed=42,  # 固定隨機種子以增加可重複性
-            )
-            model.learn(total_timesteps=total_timesteps)
-            model.save(MODEL_PATH)
+        model_loaded = False
+        model_path_zip = f"{MODEL_PATH}.zip"
+        if use_saved_model and os.path.exists(model_path_zip):
+            with st.spinner("載入既有模型中..."):
+                model = PPO.load(MODEL_PATH, env=train_env, device="auto")
+                model_loaded = True
+                st.info("已載入既有模型，跳過重新訓練。")
+
+        if not model_loaded:
+            with st.spinner(f"訓練 PPO 模型中（{effective_timesteps:,} 步）..."):
+                policy_kwargs = dict(
+                    net_arch=[256, 256, 128],
+                )
+
+                if performance_mode == "快速模式":
+                    n_steps = 512
+                    batch_size = 64
+                    n_epochs = 8
+                else:
+                    n_steps = 1024
+                    batch_size = 32
+                    n_epochs = 15
+
+                model = PPO(
+                    policy="MlpPolicy",
+                    env=train_env,
+                    learning_rate=5e-4,
+                    n_steps=n_steps,
+                    batch_size=batch_size,
+                    n_epochs=n_epochs,
+                    gamma=0.99,
+                    gae_lambda=0.95,
+                    clip_range=0.2,
+                    ent_coef=0.02,
+                    verbose=0,
+                    device="auto",
+                    policy_kwargs=policy_kwargs,
+                    seed=42,
+                )
+                model.learn(total_timesteps=effective_timesteps)
+                model.save(MODEL_PATH)
 
         st.success(f"✅ 模型訓練完成，已儲存為 `{MODEL_PATH}.zip`")
 
@@ -772,27 +823,29 @@ if run_btn:
         )
         metrics, equity_curve, action_history, trade_log = evaluate_agent(model, test_env)
 
-        stress_df = run_cost_stress_test(
-            model=model,
-            test_df=test_df,
-            feature_cols=feature_cols,
-            initial_balance=float(initial_balance),
-            trade_fee=trade_fee,
-            slippage_bps=slippage_bps,
-            spread_bps=spread_bps,
-            maker_fee=maker_fee,
-            taker_fee=taker_fee,
-            min_trade_pct=min_trade_pct,
-            min_notional=min_notional,
-            min_qty=min_qty,
-            qty_step=qty_step,
-            price_step=price_step,
-            position_step=float(position_step),
-            slippage_vol_multiplier=slippage_vol_multiplier,
-            max_drawdown_limit=max_drawdown_limit,
-            daily_loss_limit=daily_loss_limit,
-            volatility_target=volatility_target,
-        )
+        stress_df = None
+        if run_stress_test:
+            stress_df = run_cost_stress_test(
+                model=model,
+                test_df=test_df,
+                feature_cols=feature_cols,
+                initial_balance=float(initial_balance),
+                trade_fee=trade_fee,
+                slippage_bps=slippage_bps,
+                spread_bps=spread_bps,
+                maker_fee=maker_fee,
+                taker_fee=taker_fee,
+                min_trade_pct=min_trade_pct,
+                min_notional=min_notional,
+                min_qty=min_qty,
+                qty_step=qty_step,
+                price_step=price_step,
+                position_step=float(position_step),
+                slippage_vol_multiplier=slippage_vol_multiplier,
+                max_drawdown_limit=max_drawdown_limit,
+                daily_loss_limit=daily_loss_limit,
+                volatility_target=volatility_target,
+            )
 
         # Buy & Hold baseline
         test_prices = test_df["Close"].values
@@ -855,10 +908,11 @@ if run_btn:
         a3.metric("交易次數", f"{adv['trade_count']}")
         a4.metric("交易密度", f"{adv['trade_density'] * 100:.1f} %")
 
-        st.subheader("🧱 成本壓力測試")
-        st.dataframe(stress_df, use_container_width=True)
-        stress_chart = stress_df.set_index("Scenario")[["FinalNetWorth"]]
-        st.bar_chart(stress_chart)
+        if stress_df is not None:
+            st.subheader("🧱 成本壓力測試")
+            st.dataframe(stress_df, use_container_width=True)
+            stress_chart = stress_df.set_index("Scenario")[["FinalNetWorth"]]
+            st.bar_chart(stress_chart)
 
         st.subheader("🧾 交易執行日誌")
         if len(trade_log) > 0:
@@ -900,7 +954,11 @@ if run_btn:
                 eq_df = eq_df.set_index("Datetime")
             st.line_chart(eq_df)
 
-        if enable_walk_forward:
+        effective_walk_forward = enable_walk_forward and performance_mode == "完整模式"
+        if enable_walk_forward and performance_mode == "快速模式":
+            st.info("快速模式下已自動略過 Walk-forward，以縮短等待時間。")
+
+        if effective_walk_forward:
             with st.spinner("執行 Walk-forward 滾動回測中..."):
                 wf_df = run_walk_forward_backtest(
                     df=df,
