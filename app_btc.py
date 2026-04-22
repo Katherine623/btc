@@ -83,84 +83,122 @@ with st.sidebar:
     train_split = st.slider("訓練集比例", min_value=0.5, max_value=0.9, value=0.8, step=0.05)
 
     st.divider()
-    st.subheader("🏦 現實市場設定")
-    slippage_bps = st.slider("基礎滑價（bps）", min_value=0.0, max_value=30.0, value=8.0, step=1.0)
-    spread_bps = st.slider("買賣價差（bps）", min_value=0.0, max_value=20.0, value=4.0, step=1.0)
-    min_trade_pct = st.slider("最小成交比例", min_value=0.0, max_value=0.10, value=0.02, step=0.005)
-    position_step = st.select_slider("單次調倉步長", options=[0.10, 0.20, 0.25, 0.33, 0.50], value=0.25)
-    slippage_vol_multiplier = st.slider("高波動滑價放大倍數", min_value=0.0, max_value=3.0, value=1.2, step=0.1)
 
-    st.divider()
-    st.subheader("🧪 Walk-forward 回測")
-    enable_walk_forward = st.checkbox("啟用 Walk-forward 滾動回測", value=False)
-    if enable_walk_forward:
-        wf_train_window = st.number_input("每折訓練長度（bars）", min_value=120, value=360, step=60)
-        wf_test_window = st.number_input("每折測試長度（bars）", min_value=48, value=120, step=24)
-        wf_max_folds = st.number_input("最多折數", min_value=2, max_value=12, value=5, step=1)
-        wf_timesteps = st.select_slider(
-            "每折訓練步數",
-            options=[10_000, 20_000, 30_000, 50_000, 80_000],
-            value=20_000,
-        )
-    else:
-        wf_train_window = 360
-        wf_test_window = 120
-        wf_max_folds = 5
-        wf_timesteps = 20_000
+    # Session defaults for auto/advanced configuration.
+    defaults = {
+        "slippage_bps": 8.0,
+        "spread_bps": 4.0,
+        "min_trade_pct": 0.02,
+        "position_step": 0.25,
+        "slippage_vol_multiplier": 1.2,
+        "wf_train_window": 360,
+        "wf_test_window": 120,
+        "wf_max_folds": 5,
+        "wf_timesteps": 20_000,
+        "enable_walk_forward": False,
+    }
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
 
-    st.divider()
-    st.subheader("🧠 Regime 門檻控制")
     if "base_threshold" not in st.session_state:
         st.session_state.base_threshold = 0.55
     if "strictness_multiplier" not in st.session_state:
         st.session_state.strictness_multiplier = 1.15
-    if "regime_preset" not in st.session_state:
-        st.session_state.regime_preset = "平衡"
+    if "strategy_preset" not in st.session_state:
+        st.session_state.strategy_preset = "平衡"
 
-    regime_mode = st.radio(
-        "Regime 門檻模式",
+    ui_mode = st.radio(
+        "參數模式",
         ["自動模式", "進階模式"],
         index=0,
         horizontal=True,
     )
 
-    st.caption("一鍵預設")
+    st.subheader("🎛️ 策略風格")
+    st.caption("一鍵預設（保守 / 平衡 / 積極）")
     p1, p2, p3 = st.columns(3)
     if p1.button("保守", use_container_width=True):
         st.session_state.base_threshold = 0.62
-        st.session_state.strictness_multiplier = 1.25
-        st.session_state.regime_preset = "保守"
+        st.session_state.strictness_multiplier = 1.30
+        st.session_state.min_trade_pct = 0.03
+        st.session_state.position_step = 0.20
+        st.session_state.enable_walk_forward = False
+        st.session_state.strategy_preset = "保守"
     if p2.button("平衡", use_container_width=True):
         st.session_state.base_threshold = 0.55
         st.session_state.strictness_multiplier = 1.15
-        st.session_state.regime_preset = "平衡"
+        st.session_state.min_trade_pct = 0.02
+        st.session_state.position_step = 0.25
+        st.session_state.enable_walk_forward = False
+        st.session_state.strategy_preset = "平衡"
     if p3.button("積極", use_container_width=True):
         st.session_state.base_threshold = 0.48
         st.session_state.strictness_multiplier = 1.05
-        st.session_state.regime_preset = "積極"
+        st.session_state.min_trade_pct = 0.01
+        st.session_state.position_step = 0.33
+        st.session_state.enable_walk_forward = False
+        st.session_state.strategy_preset = "積極"
 
-    if regime_mode == "進階模式":
-        st.slider(
+    if ui_mode == "自動模式":
+        st.info(
+            f"目前使用 {st.session_state.strategy_preset} 預設："
+            f"Regime 門檻 {st.session_state.base_threshold:.2f} / "
+            f"高波動倍數 {st.session_state.strictness_multiplier:.2f} / "
+            f"調倉步長 {st.session_state.position_step:.2f}"
+        )
+    else:
+        st.divider()
+        st.subheader("🏦 現實市場設定")
+        st.session_state.slippage_bps = st.slider("基礎滑價（bps）", min_value=0.0, max_value=30.0, value=float(st.session_state.slippage_bps), step=1.0)
+        st.session_state.spread_bps = st.slider("買賣價差（bps）", min_value=0.0, max_value=20.0, value=float(st.session_state.spread_bps), step=1.0)
+        st.session_state.min_trade_pct = st.slider("最小成交比例", min_value=0.0, max_value=0.10, value=float(st.session_state.min_trade_pct), step=0.005)
+        st.session_state.position_step = st.select_slider("單次調倉步長", options=[0.10, 0.20, 0.25, 0.33, 0.50], value=float(st.session_state.position_step))
+        st.session_state.slippage_vol_multiplier = st.slider("高波動滑價放大倍數", min_value=0.0, max_value=3.0, value=float(st.session_state.slippage_vol_multiplier), step=0.1)
+
+        st.divider()
+        st.subheader("🧪 Walk-forward 回測")
+        st.session_state.enable_walk_forward = st.checkbox("啟用 Walk-forward 滾動回測", value=bool(st.session_state.enable_walk_forward))
+        if st.session_state.enable_walk_forward:
+            st.session_state.wf_train_window = int(st.number_input("每折訓練長度（bars）", min_value=120, value=int(st.session_state.wf_train_window), step=60))
+            st.session_state.wf_test_window = int(st.number_input("每折測試長度（bars）", min_value=48, value=int(st.session_state.wf_test_window), step=24))
+            st.session_state.wf_max_folds = int(st.number_input("最多折數", min_value=2, max_value=12, value=int(st.session_state.wf_max_folds), step=1))
+            st.session_state.wf_timesteps = int(
+                st.select_slider(
+                    "每折訓練步數",
+                    options=[10_000, 20_000, 30_000, 50_000, 80_000],
+                    value=int(st.session_state.wf_timesteps),
+                )
+            )
+
+        st.divider()
+        st.subheader("🧠 Regime 門檻控制")
+        st.session_state.base_threshold = st.slider(
             "基準信心閾值",
             min_value=0.45,
             max_value=0.75,
+            value=float(st.session_state.base_threshold),
             step=0.01,
-            key="base_threshold",
         )
-        st.slider(
+        st.session_state.strictness_multiplier = st.slider(
             "高波動嚴格倍數",
             min_value=1.0,
             max_value=1.4,
+            value=float(st.session_state.strictness_multiplier),
             step=0.05,
-            key="strictness_multiplier",
-        )
-    else:
-        st.info(
-            f"目前使用 {st.session_state.regime_preset} 預設："
-            f"基準閾值 {st.session_state.base_threshold:.2f} / "
-            f"高波動倍數 {st.session_state.strictness_multiplier:.2f}"
         )
 
+    slippage_bps = float(st.session_state.slippage_bps)
+    spread_bps = float(st.session_state.spread_bps)
+    min_trade_pct = float(st.session_state.min_trade_pct)
+    position_step = float(st.session_state.position_step)
+    slippage_vol_multiplier = float(st.session_state.slippage_vol_multiplier)
+
+    enable_walk_forward = bool(st.session_state.enable_walk_forward)
+    wf_train_window = int(st.session_state.wf_train_window)
+    wf_test_window = int(st.session_state.wf_test_window)
+    wf_max_folds = int(st.session_state.wf_max_folds)
+    wf_timesteps = int(st.session_state.wf_timesteps)
     base_threshold = float(st.session_state.base_threshold)
     strictness_multiplier = float(st.session_state.strictness_multiplier)
 
