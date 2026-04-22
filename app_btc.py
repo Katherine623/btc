@@ -216,12 +216,9 @@ if run_btn:
 
         # 4) 訓練 PPO
         with st.spinner(f"訓練 PPO 模型中（{total_timesteps:,} 步）..."):
-            from stable_baselines3.common.policies import MlpPolicy
-            
             # 增大網絡容量以提升學習能力
             policy_kwargs = dict(
                 net_arch=[256, 256, 128],  # 更深的網絡
-                activation_fn=st.session_state.get("activation_fn", None),  # 使用 default (relu)
             )
             
             model = PPO(
