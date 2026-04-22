@@ -129,10 +129,19 @@ def load_or_download_data() -> pd.DataFrame:
     return df_raw
 
 
-def plot_equity_curve(equity_curve, buy_hold_curve, title="Equity Curve"):
+def get_time_axis(df: pd.DataFrame, length: int):
+    if "Datetime" in df.columns:
+        dt = pd.to_datetime(df["Datetime"], errors="coerce").iloc[:length]
+        if dt.notna().all() and len(dt) == length:
+            return dt, True
+    return pd.RangeIndex(start=0, stop=length, step=1), False
+
+
+def plot_equity_curve(equity_curve, buy_hold_curve, time_axis, use_datetime, title="Equity Curve"):
     fig, ax = plt.subplots(figsize=(10, 4))
-    ax.plot(equity_curve, label="RL Agent", color="#f7931a", linewidth=1.5)
+    ax.plot(time_axis, equity_curve, label="RL Agent", color="#f7931a", linewidth=1.5)
     ax.plot(
+        time_axis,
         buy_hold_curve[: len(equity_curve)],
         label="Buy & Hold",
         color="#4c72b0",
@@ -140,10 +149,12 @@ def plot_equity_curve(equity_curve, buy_hold_curve, title="Equity Curve"):
         linestyle="--",
     )
     ax.set_title(title, fontsize=14)
-    ax.set_xlabel("Time Step")
+    ax.set_xlabel("Datetime" if use_datetime else "Time Step")
     ax.set_ylabel("Portfolio Value (USD)")
     ax.legend()
     ax.grid(True, alpha=0.3)
+    if use_datetime:
+        fig.autofmt_xdate()
     plt.tight_layout()
     return fig
 
@@ -161,22 +172,24 @@ def plot_action_distribution(action_history):
     return fig
 
 
-def plot_price_with_signals(test_df, action_history):
+def plot_price_with_signals(test_df, action_history, time_axis, use_datetime):
     prices = test_df["Close"].values[: len(action_history)]
-    steps = list(range(len(action_history)))
+    x = np.array(time_axis[: len(action_history)])
 
     buy_steps  = [i for i, a in enumerate(action_history) if a == 1]
     sell_steps = [i for i, a in enumerate(action_history) if a == 2]
 
     fig, ax = plt.subplots(figsize=(10, 4))
-    ax.plot(steps, prices, color="gray", linewidth=1, label="Close Price")
-    ax.scatter(buy_steps,  [prices[i] for i in buy_steps],  marker="^", color="green",  s=60, zorder=5, label="Buy")
-    ax.scatter(sell_steps, [prices[i] for i in sell_steps], marker="v", color="red",    s=60, zorder=5, label="Sell")
+    ax.plot(x, prices, color="gray", linewidth=1, label="Close Price")
+    ax.scatter([x[i] for i in buy_steps],  [prices[i] for i in buy_steps],  marker="^", color="green",  s=60, zorder=5, label="Buy")
+    ax.scatter([x[i] for i in sell_steps], [prices[i] for i in sell_steps], marker="v", color="red",    s=60, zorder=5, label="Sell")
     ax.set_title("Price Chart with Trade Signals")
-    ax.set_xlabel("Time Step")
+    ax.set_xlabel("Datetime" if use_datetime else "Time Step")
     ax.set_ylabel("BTC Price (USD)")
     ax.legend()
     ax.grid(True, alpha=0.3)
+    if use_datetime:
+        fig.autofmt_xdate()
     plt.tight_layout()
     return fig
 
@@ -281,6 +294,7 @@ if run_btn:
         # Buy & Hold baseline
         test_prices = test_df["Close"].values
         buy_hold_curve = float(initial_balance) * (test_prices / test_prices[0])
+        time_axis, use_datetime = get_time_axis(test_df, len(equity_curve))
 
         # 6) 指標顯示
         st.subheader("📊 測試集績效指標")
@@ -313,10 +327,10 @@ if run_btn:
 
         # 7) 圖表
         st.subheader("📈 資產曲線")
-        st.pyplot(plot_equity_curve(equity_curve, buy_hold_curve))
+        st.pyplot(plot_equity_curve(equity_curve, buy_hold_curve, time_axis, use_datetime))
 
         st.subheader("🔔 交易訊號")
-        st.pyplot(plot_price_with_signals(test_df, action_history))
+        st.pyplot(plot_price_with_signals(test_df, action_history, time_axis, use_datetime))
 
         col_a, col_b = st.columns(2)
         with col_a:
@@ -329,6 +343,9 @@ if run_btn:
                 "RL Agent": equity_curve,
                 "Buy & Hold": buy_hold_curve[: len(equity_curve)],
             })
+            if use_datetime:
+                eq_df["Datetime"] = time_axis
+                eq_df = eq_df.set_index("Datetime")
             st.line_chart(eq_df)
 
         # 8) 訓練資料摘要
