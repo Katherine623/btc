@@ -64,38 +64,16 @@
 
 ## 成果截圖區塊
 
-請將截圖放在 `assets/screenshots/`，建議檔名如下：
+以下為目前專案已放入的 3 張成果圖：
 
-1. hero_overview.png（首頁與核心指標）
-2. equity_curve.png（資產曲線 RL vs Buy&Hold）
-3. signal_chart.png（買賣點與價格圖）
-4. regime_overlay.png（Regime 背景視圖）
-5. stress_test.png（成本壓力測試）
-6. trade_log.png（交易執行日誌）
-
-範例模板（把檔名換成你的實際截圖）：
-
-```markdown
-## 成果截圖
-
-### 1) 系統總覽
-![系統總覽](assets/screenshots/hero_overview.png)
-
-### 2) 資產曲線
+### 1) 資產曲線（RL vs Buy & Hold）
 ![資產曲線](assets/screenshots/equity_curve.png)
 
-### 3) 交易訊號
+### 2) 交易訊號（Buy/Sell）
 ![交易訊號](assets/screenshots/signal_chart.png)
 
-### 4) Regime 背景視圖
+### 3) Regime 背景視圖
 ![Regime 背景](assets/screenshots/regime_overlay.png)
-
-### 5) 成本壓力測試
-![壓力測試](assets/screenshots/stress_test.png)
-
-### 6) 交易執行日誌
-![交易日誌](assets/screenshots/trade_log.png)
-```
 
 ## 系統流程
 
