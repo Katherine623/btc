@@ -181,6 +181,33 @@ def plot_price_with_signals(test_df, action_history):
     return fig
 
 
+def infer_next_signal(model, df: pd.DataFrame, feature_cols: list, initial_balance: float):
+    # Use the latest engineered features plus a neutral portfolio state as next-period input.
+    feats = df[feature_cols].values.astype(np.float32)
+    feat_mean = feats.mean(axis=0, keepdims=True)
+    feat_std = feats.std(axis=0, keepdims=True) + 1e-8
+    latest_feat = ((feats[-1:] - feat_mean) / feat_std).astype(np.float32)[0]
+
+    agent_state = np.array([0.0, 1.0, 1.0], dtype=np.float32)  # position=0, balance=1x, net_worth=1x
+    obs = np.concatenate([latest_feat, agent_state], axis=0).astype(np.float32).reshape(1, -1)
+
+    action, _ = model.predict(obs, deterministic=True)
+
+    obs_tensor, _ = model.policy.obs_to_tensor(obs)
+    dist = model.policy.get_distribution(obs_tensor)
+    probs = dist.distribution.probs.detach().cpu().numpy()[0]
+
+    action_idx = int(action)
+    action_map = {0: "Hold", 1: "Buy", 2: "Sell"}
+
+    return {
+        "action": action_idx,
+        "label": action_map.get(action_idx, "Hold"),
+        "confidence": float(np.max(probs)),
+        "probs": probs,
+    }
+
+
 # ──────────────────────────────────────────────
 # 執行
 # ──────────────────────────────────────────────
@@ -264,6 +291,25 @@ if run_btn:
         m2.metric("Sharpe Ratio",       f"{metrics['sharpe_ratio']:.3f}")
         m3.metric("最大回撤",            f"{metrics['max_drawdown'] * 100:.2f} %")
         m4.metric("最終資產（USD）",     f"{equity_curve[-1]:,.2f}")
+
+        # 6-1) 下一根 K 棒訊號（1d 時可視為明日訊號）
+        next_signal = infer_next_signal(
+            model=model,
+            df=df,
+            feature_cols=feature_cols,
+            initial_balance=float(initial_balance),
+        )
+        st.subheader("🔮 下一根 K 棒建議訊號")
+        s1, s2, s3, s4 = st.columns(4)
+        s1.metric("建議動作", next_signal["label"])
+        s2.metric("信心分數", f"{next_signal['confidence'] * 100:.1f} %")
+        s3.metric("Buy 機率", f"{next_signal['probs'][1] * 100:.1f} %")
+        s4.metric("Sell 機率", f"{next_signal['probs'][2] * 100:.1f} %")
+
+        if yf_interval == "1d":
+            st.info("此訊號對應下一根日線（可視為明日建議）。")
+        else:
+            st.info("此訊號對應下一根 K 棒（你目前使用的是 1h 週期）。")
 
         # 7) 圖表
         st.subheader("📈 資產曲線")
