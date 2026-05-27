@@ -448,7 +448,7 @@ def plot_performance_dashboard(equity_curve, buy_hold_curve, time_axis, use_date
 
     if use_datetime:
         dt = pd.to_datetime(time_axis[: len(eq)], errors="coerce")
-        years = pd.Series(dt).dt.year.fillna(method="ffill").fillna(0).astype(int)
+        years = pd.Series(dt).dt.year.ffill().fillna(0).astype(int)
     else:
         # Fallback pseudo-years for non-datetime index.
         years = pd.Series(np.floor(np.linspace(2020, 2020 + len(eq) / 250, len(eq))).astype(int))
