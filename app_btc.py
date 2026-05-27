@@ -929,9 +929,17 @@ if run_btn:
         model_path_zip = f"{MODEL_PATH}.zip"
         if use_saved_model and os.path.exists(model_path_zip):
             with st.spinner("載入既有模型中..."):
-                model = PPO.load(MODEL_PATH, env=train_env, device="auto")
-                model_loaded = True
-                st.info("已載入既有模型，跳過重新訓練。")
+                try:
+                    model = PPO.load(MODEL_PATH, env=train_env, device="auto")
+                    model_loaded = True
+                    st.info("已載入既有模型，跳過重新訓練。")
+                except Exception as load_err:
+                    st.warning(
+                        "偵測到既有模型與目前特徵維度/觀測空間不相容，"
+                        "已自動切換為重新訓練。\n\n"
+                        f"原因：{str(load_err)}"
+                    )
+                    model_loaded = False
 
         if not model_loaded:
             with st.spinner(f"訓練 PPO 模型中（{effective_timesteps:,} 步）..."):
