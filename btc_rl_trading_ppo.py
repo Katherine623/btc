@@ -410,6 +410,7 @@ class BitcoinTradingEnv(gym.Env):
         tiny_trade_penalty: float = 0.0007,
         allow_short: bool = True,
         max_leverage: float = 1.0,
+        terminate_on_risk_breach: bool = True,
     ):
         super().__init__()
 
@@ -439,6 +440,7 @@ class BitcoinTradingEnv(gym.Env):
         self.tiny_trade_penalty = float(tiny_trade_penalty)
         self.allow_short = bool(allow_short)
         self.max_leverage = float(max(0.5, max_leverage))
+        self.terminate_on_risk_breach = bool(terminate_on_risk_breach)
 
         self.prices = self.df["Close"].values.astype(np.float32)
         self.features_raw = self.df[self.feature_cols].values.astype(np.float32)
@@ -618,7 +620,7 @@ class BitcoinTradingEnv(gym.Env):
             )
 
         self.current_step += 1
-        terminated = self.current_step >= len(self.df) - 1 or risk_breached
+        terminated = self.current_step >= len(self.df) - 1 or (risk_breached and self.terminate_on_risk_breach)
         truncated = False
 
         if not terminated:

@@ -1032,6 +1032,7 @@ if run_btn:
         with st.spinner("Computing technical indicators..."):
             df = add_technical_indicators_cached(df_raw)
         df = add_market_regime_labels(df)
+        df_display = df.copy().reset_index(drop=True)
 
         if performance_mode == "Fast mode" and len(df) > int(fast_max_bars):
             df = df.iloc[-int(fast_max_bars):].reset_index(drop=True)
@@ -1159,6 +1160,36 @@ if run_btn:
             eta_trade_penalty=eta_trade_penalty,
         )
         metrics, equity_curve, action_history, trade_log = evaluate_agent(model, test_env)
+
+        # Full-period visualization run: keep selected period length on charts (2y shows 2y, 5y shows 5y).
+        display_env = BitcoinTradingEnv(
+            df=df_display,
+            feature_cols=feature_cols,
+            initial_balance=float(initial_balance),
+            trade_fee=trade_fee,
+            slippage_bps=slippage_bps,
+            spread_bps=spread_bps,
+            maker_fee=maker_fee,
+            taker_fee=taker_fee,
+            min_trade_pct=min_trade_pct,
+            min_notional=min_notional,
+            min_qty=min_qty,
+            qty_step=qty_step,
+            price_step=price_step,
+            position_step=float(position_step),
+            slippage_vol_multiplier=slippage_vol_multiplier,
+            max_drawdown_limit=max_drawdown_limit,
+            daily_loss_limit=daily_loss_limit,
+            volatility_target=volatility_target,
+            action_threshold=action_threshold,
+            lambda_downside=lambda_downside,
+            eta_trade_penalty=eta_trade_penalty,
+            terminate_on_risk_breach=False,
+        )
+        _, display_equity_curve, display_action_history, _ = evaluate_agent(model, display_env)
+        display_prices = df_display["Close"].values
+        display_buy_hold_curve = float(initial_balance) * (display_prices / display_prices[0])
+        display_time_axis, display_use_datetime = get_time_axis(df_display, len(display_equity_curve))
 
         stress_df = None
         if run_stress_test:
@@ -1366,36 +1397,36 @@ if run_btn:
         else:
             st.info("This signal maps to the next bar (you are currently using a 1h interval).")
 
-        # 7) Charts
+        # 7) Charts (always use full selected period)
         st.subheader("🧩 Historical Performance Dashboard")
-        st.pyplot(plot_performance_dashboard(equity_curve, buy_hold_curve, time_axis, use_datetime, action_history))
+        st.pyplot(plot_performance_dashboard(display_equity_curve, display_buy_hold_curve, display_time_axis, display_use_datetime, display_action_history))
 
         st.subheader("📈 Equity Curve")
-        st.pyplot(plot_equity_curve(equity_curve, buy_hold_curve, time_axis, use_datetime))
+        st.pyplot(plot_equity_curve(display_equity_curve, display_buy_hold_curve, display_time_axis, display_use_datetime))
 
         st.subheader("🔔 Trade Signals")
-        st.pyplot(plot_price_with_signals(test_df, action_history, time_axis, use_datetime))
+        st.pyplot(plot_price_with_signals(df_display, display_action_history, display_time_axis, display_use_datetime))
 
         st.subheader("🗺️ Regime Background View")
-        st.pyplot(plot_price_with_regime_overlay(test_df, action_history, time_axis, use_datetime))
+        st.pyplot(plot_price_with_regime_overlay(df_display, display_action_history, display_time_axis, display_use_datetime))
 
         col_a, col_b = st.columns(2)
         with col_a:
             st.subheader("🎯 Action Distribution")
-            st.pyplot(plot_action_distribution(action_history))
+            st.pyplot(plot_action_distribution(display_action_history))
 
         with col_b:
             st.subheader("📉 Equity Curve (Data)")
             eq_df = pd.DataFrame({
-                "RL Agent": equity_curve,
-                "Buy & Hold": buy_hold_curve[: len(equity_curve)],
+                "RL Agent": display_equity_curve,
+                "Buy & Hold": display_buy_hold_curve[: len(display_equity_curve)],
             })
-            if use_datetime:
-                eq_df["Datetime"] = time_axis
+            if display_use_datetime:
+                eq_df["Datetime"] = display_time_axis
                 eq_df = eq_df.set_index("Datetime")
             st.line_chart(eq_df)
 
-        heatmap_fig = plot_monthly_return_heatmap(time_axis, equity_curve, use_datetime)
+        heatmap_fig = plot_monthly_return_heatmap(display_time_axis, display_equity_curve, display_use_datetime)
         if heatmap_fig is not None:
             st.subheader("🗓️ Monthly Returns Heatmap")
             st.pyplot(heatmap_fig)
