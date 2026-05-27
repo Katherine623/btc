@@ -34,9 +34,31 @@ from btc_rl_trading_ppo import (
     explain_actor_with_shap,
 )
 
+CJK_FONT_PROP = None
+
 
 def configure_matplotlib_cjk_font():
     """Set a CJK-capable font fallback list to avoid garbled Chinese labels."""
+    global CJK_FONT_PROP
+
+    candidate_paths = [
+        r"C:\Windows\Fonts\msjh.ttc",      # Microsoft JhengHei
+        r"C:\Windows\Fonts\msjhbd.ttc",    # Microsoft JhengHei Bold
+        r"C:\Windows\Fonts\msyh.ttc",      # Microsoft YaHei
+        r"C:\Windows\Fonts\simhei.ttf",    # SimHei
+    ]
+
+    selected = None
+    for font_path in candidate_paths:
+        if os.path.exists(font_path):
+            try:
+                fm.fontManager.addfont(font_path)
+                CJK_FONT_PROP = fm.FontProperties(fname=font_path)
+                selected = CJK_FONT_PROP.get_name()
+                break
+            except Exception:
+                continue
+
     preferred_fonts = [
         "Microsoft JhengHei",
         "Microsoft YaHei",
@@ -48,7 +70,10 @@ def configure_matplotlib_cjk_font():
     ]
 
     available = {font.name for font in fm.fontManager.ttflist}
-    selected = next((name for name in preferred_fonts if name in available), None)
+    if not selected:
+        selected = next((name for name in preferred_fonts if name in available), None)
+        if selected:
+            CJK_FONT_PROP = fm.FontProperties(family=selected)
 
     plt.rcParams["font.family"] = "sans-serif"
     existing = list(plt.rcParams.get("font.sans-serif", []))
@@ -464,6 +489,8 @@ def _calc_hold_stats(action_history):
 
 
 def plot_performance_dashboard(equity_curve, buy_hold_curve, time_axis, use_datetime, action_history):
+    fp = CJK_FONT_PROP
+
     eq = np.asarray(equity_curve, dtype=np.float64)
     bh = np.asarray(buy_hold_curve[: len(eq)], dtype=np.float64)
 
@@ -529,9 +556,9 @@ def plot_performance_dashboard(equity_curve, buy_hold_curve, time_axis, use_date
 
         icon = "✓" if card_flags[i] else "✕"
         icon_color = "#63F5DD" if card_flags[i] else "#FF6B6B"
-        ax_cards.text(x0 + 0.03, 0.72, icon, color=icon_color, fontsize=12, weight="bold", transform=ax_cards.transAxes)
-        ax_cards.text(x0 + 0.06, 0.70, card_labels[i], color="#D8DCEC", fontsize=12, transform=ax_cards.transAxes)
-        ax_cards.text(x0 + 0.02, 0.36, card_values[i], color="#EEF1FF", fontsize=22, weight="bold", transform=ax_cards.transAxes)
+        ax_cards.text(x0 + 0.03, 0.72, icon, color=icon_color, fontsize=12, weight="bold", transform=ax_cards.transAxes, fontproperties=fp)
+        ax_cards.text(x0 + 0.06, 0.70, card_labels[i], color="#D8DCEC", fontsize=12, transform=ax_cards.transAxes, fontproperties=fp)
+        ax_cards.text(x0 + 0.02, 0.36, card_values[i], color="#EEF1FF", fontsize=22, weight="bold", transform=ax_cards.transAxes, fontproperties=fp)
 
     # Main performance chart
     ax_main = fig.add_subplot(gs[3:9, :])
@@ -539,7 +566,7 @@ def plot_performance_dashboard(equity_curve, buy_hold_curve, time_axis, use_date
     ax_main.plot(eq, color="#7B6DFF", linewidth=2.2, label="SMC-PPO")
     ax_main.plot(bh, color="#A7ACBD", linewidth=2.0, alpha=0.9, label="Buy & Hold")
 
-    ax_main.set_title("歷史績效", loc="left", color="#ECEFFF", fontsize=24, fontweight="bold", pad=12)
+    ax_main.set_title("歷史績效", loc="left", color="#ECEFFF", fontsize=24, fontweight="bold", pad=12, fontproperties=fp)
     ax_main.tick_params(colors="#B7BDCF", labelsize=10)
     for spine in ax_main.spines.values():
         spine.set_color("#3A3E60")
