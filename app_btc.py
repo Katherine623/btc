@@ -13,6 +13,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
+import matplotlib.font_manager as fm
 import streamlit as st
 
 from stable_baselines3 import PPO
@@ -32,6 +33,35 @@ from btc_rl_trading_ppo import (
     run_ppo_baseline,
     explain_actor_with_shap,
 )
+
+
+def configure_matplotlib_cjk_font():
+    """Set a CJK-capable font fallback list to avoid garbled Chinese labels."""
+    preferred_fonts = [
+        "Microsoft JhengHei",
+        "Microsoft YaHei",
+        "Noto Sans CJK TC",
+        "Noto Sans CJK SC",
+        "PingFang TC",
+        "SimHei",
+        "Arial Unicode MS",
+    ]
+
+    available = {font.name for font in fm.fontManager.ttflist}
+    selected = next((name for name in preferred_fonts if name in available), None)
+
+    plt.rcParams["font.family"] = "sans-serif"
+    existing = list(plt.rcParams.get("font.sans-serif", []))
+    if selected:
+        plt.rcParams["font.sans-serif"] = [selected] + [name for name in existing if name != selected]
+    else:
+        # Keep defaults but still avoid minus sign glyph issues.
+        plt.rcParams["font.sans-serif"] = existing
+
+    plt.rcParams["axes.unicode_minus"] = False
+
+
+configure_matplotlib_cjk_font()
 
 # ──────────────────────────────────────────────
 # 頁面設定
