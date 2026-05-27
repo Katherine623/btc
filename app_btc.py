@@ -360,6 +360,9 @@ def add_technical_indicators_cached(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def load_or_download_data() -> pd.DataFrame:
+    effective_interval = yf_interval
+    effective_period = yf_period
+
     if data_source == "Upload CSV file" and uploaded_file is not None:
         try:
             df_raw = pd.read_csv(uploaded_file)
@@ -367,9 +370,17 @@ def load_or_download_data() -> pd.DataFrame:
             st.error(f"❌ CSV read failed: {str(e)}")
             st.stop()
     elif data_source == "Download from yfinance":
+        # Yahoo Finance intraday history is limited. 1h data often returns only ~730 days.
+        if effective_interval == "1h" and effective_period in {"5y", "10y", "max"}:
+            st.warning(
+                "Yahoo limits 1h history to about 730 days. "
+                "Switched interval to 1d automatically so the selected long period can be loaded."
+            )
+            effective_interval = "1d"
+
         try:
             with st.spinner("Downloading BTC data from yfinance... (this may take 10-30 seconds)"):
-                df_raw = fetch_yfinance_cached(yf_interval, yf_period, CSV_PATH)
+                df_raw = fetch_yfinance_cached(effective_interval, effective_period, CSV_PATH)
         except Exception as e:
             st.error(
                 f"❌ yfinance download failed.\n\n"
@@ -386,6 +397,14 @@ def load_or_download_data() -> pd.DataFrame:
     else:
         st.error("❌ Please choose a data source or upload a CSV before running.")
         st.stop()
+
+    if "Datetime" in df_raw.columns:
+        dt = pd.to_datetime(df_raw["Datetime"], errors="coerce").dropna()
+        if not dt.empty:
+            st.caption(
+                f"Loaded data range: {dt.min().date()} to {dt.max().date()} "
+                f"({len(df_raw):,} rows)"
+            )
 
     return df_raw
 
