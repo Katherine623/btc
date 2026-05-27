@@ -35,11 +35,12 @@ from btc_rl_trading_ppo import (
 )
 
 CJK_FONT_PROP = None
+CJK_FONT_FAMILY = None
 
 
 def configure_matplotlib_cjk_font():
     """Set a CJK-capable font fallback list to avoid garbled Chinese labels."""
-    global CJK_FONT_PROP
+    global CJK_FONT_PROP, CJK_FONT_FAMILY
 
     candidate_paths = [
         r"C:\Windows\Fonts\msjh.ttc",      # Microsoft JhengHei
@@ -55,6 +56,7 @@ def configure_matplotlib_cjk_font():
                 fm.fontManager.addfont(font_path)
                 CJK_FONT_PROP = fm.FontProperties(fname=font_path)
                 selected = CJK_FONT_PROP.get_name()
+                CJK_FONT_FAMILY = selected
                 break
             except Exception:
                 continue
@@ -74,8 +76,12 @@ def configure_matplotlib_cjk_font():
         selected = next((name for name in preferred_fonts if name in available), None)
         if selected:
             CJK_FONT_PROP = fm.FontProperties(family=selected)
+            CJK_FONT_FAMILY = selected
 
-    plt.rcParams["font.family"] = "sans-serif"
+    if selected:
+        plt.rcParams["font.family"] = selected
+    else:
+        plt.rcParams["font.family"] = "sans-serif"
     existing = list(plt.rcParams.get("font.sans-serif", []))
     if selected:
         plt.rcParams["font.sans-serif"] = [selected] + [name for name in existing if name != selected]
@@ -87,6 +93,14 @@ def configure_matplotlib_cjk_font():
 
 
 configure_matplotlib_cjk_font()
+
+
+def cjk_text_kwargs(**kwargs):
+    if CJK_FONT_PROP is not None:
+        kwargs["fontproperties"] = CJK_FONT_PROP
+    elif CJK_FONT_FAMILY:
+        kwargs["fontfamily"] = CJK_FONT_FAMILY
+    return kwargs
 
 # ──────────────────────────────────────────────
 # 頁面設定
@@ -489,8 +503,6 @@ def _calc_hold_stats(action_history):
 
 
 def plot_performance_dashboard(equity_curve, buy_hold_curve, time_axis, use_datetime, action_history):
-    fp = CJK_FONT_PROP
-
     eq = np.asarray(equity_curve, dtype=np.float64)
     bh = np.asarray(buy_hold_curve[: len(eq)], dtype=np.float64)
 
@@ -556,9 +568,9 @@ def plot_performance_dashboard(equity_curve, buy_hold_curve, time_axis, use_date
 
         icon = "✓" if card_flags[i] else "✕"
         icon_color = "#63F5DD" if card_flags[i] else "#FF6B6B"
-        ax_cards.text(x0 + 0.03, 0.72, icon, color=icon_color, fontsize=12, weight="bold", transform=ax_cards.transAxes, fontproperties=fp)
-        ax_cards.text(x0 + 0.06, 0.70, card_labels[i], color="#D8DCEC", fontsize=12, transform=ax_cards.transAxes, fontproperties=fp)
-        ax_cards.text(x0 + 0.02, 0.36, card_values[i], color="#EEF1FF", fontsize=22, weight="bold", transform=ax_cards.transAxes, fontproperties=fp)
+        ax_cards.text(x0 + 0.03, 0.72, icon, color=icon_color, fontsize=12, weight="bold", transform=ax_cards.transAxes, **cjk_text_kwargs())
+        ax_cards.text(x0 + 0.06, 0.70, card_labels[i], color="#D8DCEC", fontsize=12, transform=ax_cards.transAxes, **cjk_text_kwargs())
+        ax_cards.text(x0 + 0.02, 0.36, card_values[i], color="#EEF1FF", fontsize=22, weight="bold", transform=ax_cards.transAxes, **cjk_text_kwargs())
 
     # Main performance chart
     ax_main = fig.add_subplot(gs[3:9, :])
@@ -566,7 +578,7 @@ def plot_performance_dashboard(equity_curve, buy_hold_curve, time_axis, use_date
     ax_main.plot(eq, color="#7B6DFF", linewidth=2.2, label="SMC-PPO")
     ax_main.plot(bh, color="#A7ACBD", linewidth=2.0, alpha=0.9, label="Buy & Hold")
 
-    ax_main.set_title("歷史績效", loc="left", color="#ECEFFF", fontsize=24, fontweight="bold", pad=12, fontproperties=fp)
+    ax_main.set_title("歷史績效", loc="left", color="#ECEFFF", fontsize=24, fontweight="bold", pad=12, **cjk_text_kwargs())
     ax_main.tick_params(colors="#B7BDCF", labelsize=10)
     for spine in ax_main.spines.values():
         spine.set_color("#3A3E60")
@@ -609,8 +621,8 @@ def plot_performance_dashboard(equity_curve, buy_hold_curve, time_axis, use_date
         color = "#A83A72" if ret >= 0 else "#4B4FA4"
         rect = patches.Rectangle((i + 0.02, 0.20), 0.96, 0.26, facecolor=color, edgecolor="none", alpha=0.95)
         ax_strip.add_patch(rect)
-        ax_strip.text(i + 0.5, 0.58, f"{year}", ha="center", va="center", color="#D8DCEC", fontsize=10)
-        ax_strip.text(i + 0.5, 0.33, f"{ret:.1f}%", ha="center", va="center", color="#F3F5FF", fontsize=12, weight="bold")
+        ax_strip.text(i + 0.5, 0.58, f"{year}", ha="center", va="center", color="#D8DCEC", fontsize=10, **cjk_text_kwargs())
+        ax_strip.text(i + 0.5, 0.33, f"{ret:.1f}%", ha="center", va="center", color="#F3F5FF", fontsize=12, weight="bold", **cjk_text_kwargs())
 
     fig.tight_layout(pad=1.1)
     return fig
