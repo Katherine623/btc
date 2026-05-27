@@ -109,7 +109,7 @@ def _causal_smooth(series: pd.Series, weights: Tuple[float, ...] = (0.6, 0.3, 0.
     w = w / (w.sum() + 1e-8)
     out = pd.Series(np.zeros(len(series)), index=series.index, dtype=np.float64)
     for idx, weight in enumerate(w):
-        out += weight * series.shift(idx).fillna(method="bfill").fillna(0.0)
+        out += weight * series.shift(idx).bfill().fillna(0.0)
     return out
 
 
