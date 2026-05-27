@@ -660,6 +660,77 @@ def compute_advanced_metrics(equity_curve, action_history):
     }
 
 
+def format_metric_value(value, decimals=2, suffix=""):
+    if value is None:
+        return "N/A"
+    if isinstance(value, (float, np.floating)):
+        if np.isinf(value):
+            return f"∞{suffix}"
+        if np.isnan(value):
+            return "N/A"
+        return f"{value:.{decimals}f}{suffix}"
+    return f"{value}{suffix}"
+
+
+def plot_monthly_return_heatmap(time_axis, equity_curve, use_datetime):
+    if not use_datetime:
+        return None
+
+    dt_index = pd.to_datetime(time_axis[: len(equity_curve)], errors="coerce")
+    equity = pd.Series(np.asarray(equity_curve, dtype=np.float64), index=dt_index).dropna()
+    if len(equity) < 2:
+        return None
+
+    monthly_equity = equity.resample("M").last()
+    monthly_returns = monthly_equity.pct_change().dropna() * 100.0
+    if monthly_returns.empty:
+        return None
+
+    heat_df = monthly_returns.to_frame(name="Return")
+    heat_df["Year"] = heat_df.index.year
+    heat_df["Month"] = heat_df.index.month
+    pivot = heat_df.pivot(index="Year", columns="Month", values="Return").reindex(columns=range(1, 13))
+
+    data = pivot.to_numpy(dtype=np.float64)
+    finite_values = data[np.isfinite(data)]
+    if len(finite_values) == 0:
+        return None
+
+    max_abs = float(np.nanmax(np.abs(finite_values)))
+    if max_abs < 1e-8:
+        max_abs = 1.0
+
+    fig, ax = plt.subplots(figsize=(12, max(3.0, 0.55 * len(pivot.index) + 1.8)))
+    fig.patch.set_facecolor("#111325")
+    ax.set_facecolor("#161934")
+
+    im = ax.imshow(data, aspect="auto", cmap="RdYlGn", vmin=-max_abs, vmax=max_abs)
+    ax.set_xticks(range(12))
+    ax.set_xticklabels(["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"], color="#D8DCEC")
+    ax.set_yticks(range(len(pivot.index)))
+    ax.set_yticklabels([str(y) for y in pivot.index], color="#D8DCEC")
+    ax.tick_params(axis="both", length=0)
+
+    for row_idx in range(data.shape[0]):
+        for col_idx in range(data.shape[1]):
+            value = data[row_idx, col_idx]
+            if np.isfinite(value):
+                text_color = "#0B1020" if abs(value) < max_abs * 0.45 else "white"
+                ax.text(col_idx, row_idx, f"{value:.1f}%", ha="center", va="center", color=text_color, fontsize=9, weight="bold")
+
+    ax.set_title("Monthly Returns Heatmap", loc="left", color="#ECEFFF", fontsize=18, fontweight="bold", pad=12)
+    ax.set_xlabel("Month", color="#D8DCEC")
+    ax.set_ylabel("Year", color="#D8DCEC")
+
+    cbar = fig.colorbar(im, ax=ax, fraction=0.025, pad=0.02)
+    cbar.ax.yaxis.set_tick_params(color="#D8DCEC")
+    plt.setp(plt.getp(cbar.ax.axes, "yticklabels"), color="#D8DCEC")
+    cbar.set_label("Monthly Return (%)", color="#D8DCEC")
+
+    fig.tight_layout(pad=1.0)
+    return fig
+
+
 def add_market_regime_labels(df: pd.DataFrame) -> pd.DataFrame:
     labeled = df.copy()
     vol = labeled["volatility_10"].fillna(0.0)
@@ -1097,9 +1168,13 @@ if run_btn:
                 eta_trade_penalty=eta_trade_penalty,
             )
 
+        bars_per_year = 365.0 if yf_interval == "1d" else 365.0 * 24.0
+
         # Buy & Hold baseline
         test_prices = test_df["Close"].values
         buy_hold_curve = float(initial_balance) * (test_prices / test_prices[0])
+        metrics = compute_metrics(equity_curve, bars_per_year=bars_per_year)
+        buy_hold_metrics = compute_metrics(list(buy_hold_curve[: len(equity_curve)]), bars_per_year=bars_per_year)
 
         benchmark_df = None
         if run_benchmark_suite and performance_mode == "Full mode":
@@ -1126,7 +1201,7 @@ if run_btn:
                     "eta_trade_penalty": eta_trade_penalty,
                     "allow_short": True,
                 }
-                _, vanilla_metrics, _, _, _ = run_ppo_baseline(
+                _, vanilla_metrics, vanilla_equity_curve, _, _ = run_ppo_baseline(
                     train_df=train_df,
                     test_df=test_df,
                     feature_cols=vanilla_feature_cols,
@@ -1136,29 +1211,65 @@ if run_btn:
                     seed=99,
                     use_attention=False,
                 )
-                momentum_metrics = evaluate_momentum_baseline(test_df, initial_balance=float(initial_balance), fee_rate=trade_fee)
-                buy_hold_metrics = compute_metrics(list(buy_hold_curve[: len(equity_curve)]))
+                vanilla_metrics = compute_metrics(vanilla_equity_curve, bars_per_year=bars_per_year)
+
+                momentum_metrics, momentum_equity_curve = evaluate_momentum_baseline(
+                    test_df,
+                    initial_balance=float(initial_balance),
+                    fee_rate=trade_fee,
+                    return_equity_curve=True,
+                )
+                momentum_metrics = compute_metrics(momentum_equity_curve, bars_per_year=bars_per_year)
+
+                def calmar_from_curve(curve):
+                    equity = np.asarray(curve, dtype=np.float64)
+                    running_max = np.maximum.accumulate(equity)
+                    drawdown = (equity - running_max) / (running_max + 1e-8)
+                    max_drawdown_abs = abs(drawdown.min())
+                    annualized_roi = (equity[-1] / (equity[0] + 1e-8)) ** (bars_per_year / max(len(equity) - 1, 1)) - 1.0
+                    return float(annualized_roi / (max_drawdown_abs + 1e-8)) if max_drawdown_abs > 1e-12 else float("inf")
 
                 benchmark_df = pd.DataFrame(
                     [
-                        {"Model": "SMC-PPO", "CumulativeReturn": metrics["cumulative_return"], "Sharpe": metrics["sharpe_ratio"], "Sortino": metrics.get("sortino_ratio", 0.0), "MaxDrawdown": metrics["max_drawdown"]},
-                        {"Model": "Vanilla PPO", "CumulativeReturn": vanilla_metrics["cumulative_return"], "Sharpe": vanilla_metrics["sharpe_ratio"], "Sortino": vanilla_metrics.get("sortino_ratio", 0.0), "MaxDrawdown": vanilla_metrics["max_drawdown"]},
-                        {"Model": "Momentum(MACD+MA)", "CumulativeReturn": momentum_metrics["cumulative_return"], "Sharpe": momentum_metrics["sharpe_ratio"], "Sortino": momentum_metrics.get("sortino_ratio", 0.0), "MaxDrawdown": momentum_metrics["max_drawdown"]},
-                        {"Model": "Buy&Hold", "CumulativeReturn": buy_hold_metrics["cumulative_return"], "Sharpe": buy_hold_metrics["sharpe_ratio"], "Sortino": buy_hold_metrics.get("sortino_ratio", 0.0), "MaxDrawdown": buy_hold_metrics["max_drawdown"]},
+                        {"Model": "SMC-PPO", "NetPnL": metrics["net_pnl"], "AnnualizedROI": metrics["annualized_roi"], "ProfitFactor": metrics["profit_factor"], "WinRate": metrics["win_rate"], "RiskReward": metrics["risk_reward_ratio"], "Sortino": metrics.get("sortino_ratio", 0.0), "Calmar": calmar_from_curve(equity_curve), "MaxDrawdown": metrics["max_drawdown"]},
+                        {"Model": "Vanilla PPO", "NetPnL": vanilla_metrics["net_pnl"], "AnnualizedROI": vanilla_metrics["annualized_roi"], "ProfitFactor": vanilla_metrics["profit_factor"], "WinRate": vanilla_metrics["win_rate"], "RiskReward": vanilla_metrics["risk_reward_ratio"], "Sortino": vanilla_metrics.get("sortino_ratio", 0.0), "Calmar": calmar_from_curve(vanilla_equity_curve), "MaxDrawdown": vanilla_metrics["max_drawdown"]},
+                        {"Model": "Momentum(MACD+MA)", "NetPnL": momentum_metrics["net_pnl"], "AnnualizedROI": momentum_metrics["annualized_roi"], "ProfitFactor": momentum_metrics["profit_factor"], "WinRate": momentum_metrics["win_rate"], "RiskReward": momentum_metrics["risk_reward_ratio"], "Sortino": momentum_metrics.get("sortino_ratio", 0.0), "Calmar": calmar_from_curve(momentum_equity_curve), "MaxDrawdown": momentum_metrics["max_drawdown"]},
+                        {"Model": "Buy&Hold", "NetPnL": buy_hold_metrics["net_pnl"], "AnnualizedROI": buy_hold_metrics["annualized_roi"], "ProfitFactor": buy_hold_metrics["profit_factor"], "WinRate": buy_hold_metrics["win_rate"], "RiskReward": buy_hold_metrics["risk_reward_ratio"], "Sortino": buy_hold_metrics.get("sortino_ratio", 0.0), "Calmar": calmar_from_curve(buy_hold_curve[: len(equity_curve)]), "MaxDrawdown": buy_hold_metrics["max_drawdown"]},
                     ]
                 )
 
         time_axis, use_datetime = get_time_axis(test_df, len(equity_curve))
 
         # 6) Metrics display
-        st.subheader("📊 Test Set Performance Metrics")
-        m1, m2, m3, m4 = st.columns(4)
+        st.subheader("💰 Profitability & Risk Summary")
         cr  = metrics["cumulative_return"]
         bh_cr = (buy_hold_curve[len(equity_curve) - 1] / float(initial_balance)) - 1.0
-        m1.metric("Cumulative Return (RL)",  f"{cr * 100:.2f} %", delta=f"{(cr - bh_cr) * 100:.2f} % vs B&H")
-        m2.metric("Sharpe Ratio",       f"{metrics['sharpe_ratio']:.3f}")
-        m3.metric("Max Drawdown",       f"{metrics['max_drawdown'] * 100:.2f} %")
-        m4.metric("Final Equity (USD)", f"{equity_curve[-1]:,.2f}")
+
+        p1, p2, p3, p4 = st.columns(4)
+        p1.metric("Net PnL", f"${metrics['net_pnl']:,.2f}", delta=f"{metrics['net_pnl'] - buy_hold_metrics['net_pnl']:,.2f} vs B&H")
+        p2.metric("Annualized ROI", f"{metrics['annualized_roi'] * 100:.2f} %")
+        p3.metric("Profit Factor", format_metric_value(metrics['profit_factor'], decimals=2))
+        p4.metric("Win Rate", f"{metrics['win_rate'] * 100:.1f} %")
+
+        q1, q2, q3, q4 = st.columns(4)
+        q1.metric("Risk-Reward", format_metric_value(metrics['risk_reward_ratio'], decimals=2))
+        q2.metric("Gross Profit", f"${metrics['gross_profit']:,.2f}")
+        q3.metric("Gross Loss", f"${metrics['gross_loss']:,.2f}")
+        q4.metric("Expectancy", f"${metrics['expectancy']:,.2f}")
+
+        trade_df = pd.DataFrame(trade_log) if len(trade_log) > 0 else pd.DataFrame()
+        if not trade_df.empty and {"trade_size", "cost_rate", "net_worth"}.issubset(trade_df.columns):
+            pre_trade_equity = trade_df["net_worth"].shift(1).fillna(float(initial_balance))
+            est_cost = (pre_trade_equity * trade_df["trade_size"].astype(float) * trade_df["cost_rate"].astype(float)).sum()
+            gross_pnl_est = metrics["net_pnl"] + float(est_cost)
+            f1, f2, f3 = st.columns(3)
+            f1.metric("Estimated Gross PnL", f"${gross_pnl_est:,.2f}")
+            f2.metric("Estimated Net PnL", f"${metrics['net_pnl']:,.2f}")
+            f3.metric("Friction Cost Gap", f"${est_cost:,.2f}")
+
+        st.caption(
+            f"Cumulative Return (RL): {cr * 100:.2f}% | vs Buy & Hold: {(cr - bh_cr) * 100:.2f}%"
+        )
 
         # 6-0) Current market regime
         current_regime = str(df["market_regime"].iloc[-1])
@@ -1264,6 +1375,11 @@ if run_btn:
                 eq_df["Datetime"] = time_axis
                 eq_df = eq_df.set_index("Datetime")
             st.line_chart(eq_df)
+
+        heatmap_fig = plot_monthly_return_heatmap(time_axis, equity_curve, use_datetime)
+        if heatmap_fig is not None:
+            st.subheader("🗓️ Monthly Returns Heatmap")
+            st.pyplot(heatmap_fig)
 
         effective_walk_forward = enable_walk_forward and performance_mode == "Full mode"
         if enable_walk_forward and performance_mode == "Fast mode":

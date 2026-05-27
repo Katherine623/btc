@@ -650,11 +650,14 @@ class BitcoinTradingEnv(gym.Env):
 # =========================================================
 # 4. Evaluation + baselines
 # =========================================================
-def compute_metrics(net_worth_history: List[float]) -> Dict[str, float]:
+def compute_metrics(net_worth_history: List[float], bars_per_year: float = 365.0) -> Dict[str, float]:
     equity = np.array(net_worth_history, dtype=np.float64)
     returns = equity[1:] / (equity[:-1] + 1e-8) - 1.0
+    step_pnl = equity[1:] - equity[:-1]
 
     cumulative_return = float(equity[-1] / equity[0] - 1.0)
+    net_pnl = float(equity[-1] - equity[0])
+    annualized_roi = float((equity[-1] / (equity[0] + 1e-8)) ** (bars_per_year / max(len(equity) - 1, 1)) - 1.0)
 
     if returns.std() > 1e-12:
         sharpe = float(np.sqrt(252) * returns.mean() / (returns.std() + 1e-8))
@@ -669,11 +672,33 @@ def compute_metrics(net_worth_history: List[float]) -> Dict[str, float]:
     drawdown = (equity - running_max) / (running_max + 1e-8)
     max_drawdown = float(drawdown.min())
 
+    positive_pnl = step_pnl[step_pnl > 0]
+    negative_pnl = step_pnl[step_pnl < 0]
+    gross_profit = float(positive_pnl.sum())
+    gross_loss = float(abs(negative_pnl.sum()))
+    profit_factor = float(gross_profit / (gross_loss + 1e-8)) if gross_loss > 1e-12 else float("inf")
+
+    win_rate = float((step_pnl > 0).mean()) if len(step_pnl) > 0 else 0.0
+    avg_win = float(positive_pnl.mean()) if len(positive_pnl) > 0 else 0.0
+    avg_loss = float(abs(negative_pnl.mean())) if len(negative_pnl) > 0 else 0.0
+    risk_reward_ratio = float(avg_win / (avg_loss + 1e-8)) if avg_loss > 1e-12 else float("inf")
+    expectancy = float(step_pnl.mean()) if len(step_pnl) > 0 else 0.0
+
     return {
         "cumulative_return": cumulative_return,
+        "net_pnl": net_pnl,
+        "annualized_roi": annualized_roi,
         "sharpe_ratio": sharpe,
         "sortino_ratio": sortino,
         "max_drawdown": max_drawdown,
+        "gross_profit": gross_profit,
+        "gross_loss": gross_loss,
+        "profit_factor": profit_factor,
+        "win_rate": win_rate,
+        "avg_win": avg_win,
+        "avg_loss": avg_loss,
+        "risk_reward_ratio": risk_reward_ratio,
+        "expectancy": expectancy,
     }
 
 
@@ -694,6 +719,7 @@ def evaluate_momentum_baseline(
     df: pd.DataFrame,
     initial_balance: float = 10000.0,
     fee_rate: float = 0.001,
+    return_equity_curve: bool = False,
 ) -> Dict[str, float]:
     data = df.copy().reset_index(drop=True)
     signal = np.zeros(len(data), dtype=np.float64)
@@ -721,7 +747,10 @@ def evaluate_momentum_baseline(
         equity.append(max(10.0, equity[-1] * (1.0 + step_ret)))
         exposure_prev = exposure
 
-    return compute_metrics(equity)
+    metrics = compute_metrics(equity)
+    if return_equity_curve:
+        return metrics, equity
+    return metrics
 
 
 def build_buy_hold_curve(prices: np.ndarray, initial_balance: float) -> np.ndarray:
