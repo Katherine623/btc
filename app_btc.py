@@ -12,6 +12,7 @@ import os
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import matplotlib.patches as patches
 import streamlit as st
 
 from stable_baselines3 import PPO
@@ -22,9 +23,14 @@ from btc_rl_trading_ppo import (
     load_data,
     add_technical_indicators,
     build_feature_columns,
+    build_vanilla_feature_columns,
+    build_attention_policy_kwargs,
     BitcoinTradingEnv,
     evaluate_agent,
     compute_metrics,
+    evaluate_momentum_baseline,
+    run_ppo_baseline,
+    explain_actor_with_shap,
 )
 
 # ──────────────────────────────────────────────
@@ -92,6 +98,8 @@ with st.sidebar:
     )
     use_saved_model = st.checkbox("優先載入既有模型（若存在）", value=True)
     run_stress_test = st.checkbox("啟用成本壓力測試", value=(performance_mode == "完整模式"))
+    run_benchmark_suite = st.checkbox("啟用三基準對標（B&H/動能/Vanilla PPO）", value=(performance_mode == "完整模式"))
+    run_shap_analysis = st.checkbox("啟用 SHAP/特徵貢獻分析", value=False)
     if performance_mode == "快速模式":
         fast_max_bars = st.number_input("快速模式最大資料筆數", min_value=300, max_value=3000, value=900, step=100)
     else:
@@ -115,6 +123,9 @@ with st.sidebar:
         "max_drawdown_limit": 0.30,
         "daily_loss_limit": 0.06,
         "volatility_target": 0.02,
+        "action_threshold": 0.10,
+        "lambda_downside": 0.12,
+        "eta_trade_penalty": 0.004,
         "wf_train_window": 360,
         "wf_test_window": 120,
         "wf_max_folds": 5,
@@ -186,6 +197,9 @@ with st.sidebar:
         st.session_state.position_step = st.select_slider("單次調倉步長", options=[0.10, 0.20, 0.25, 0.33, 0.50], value=float(st.session_state.position_step))
         st.session_state.slippage_vol_multiplier = st.slider("高波動滑價放大倍數", min_value=0.0, max_value=3.0, value=float(st.session_state.slippage_vol_multiplier), step=0.1)
         st.session_state.volatility_target = st.slider("波動目標（風險縮放）", min_value=0.005, max_value=0.05, value=float(st.session_state.volatility_target), step=0.001, format="%.3f")
+        st.session_state.action_threshold = st.slider("動作平滑閾值 |ΔA|", min_value=0.01, max_value=0.30, value=float(st.session_state.action_threshold), step=0.01)
+        st.session_state.lambda_downside = st.slider("下行風險權重 λ", min_value=0.01, max_value=0.30, value=float(st.session_state.lambda_downside), step=0.01)
+        st.session_state.eta_trade_penalty = st.slider("調倉懲罰權重 η", min_value=0.0005, max_value=0.02, value=float(st.session_state.eta_trade_penalty), step=0.0005, format="%.4f")
 
         st.divider()
         st.subheader("🛑 風險引擎")
@@ -238,6 +252,9 @@ with st.sidebar:
     max_drawdown_limit = float(st.session_state.max_drawdown_limit)
     daily_loss_limit = float(st.session_state.daily_loss_limit)
     volatility_target = float(st.session_state.volatility_target)
+    action_threshold = float(st.session_state.action_threshold)
+    lambda_downside = float(st.session_state.lambda_downside)
+    eta_trade_penalty = float(st.session_state.eta_trade_penalty)
 
     enable_walk_forward = bool(st.session_state.enable_walk_forward)
     wf_train_window = int(st.session_state.wf_train_window)
@@ -335,8 +352,8 @@ def plot_equity_curve(equity_curve, buy_hold_curve, time_axis, use_datetime, tit
 
 
 def plot_action_distribution(action_history):
-    labels = ["Hold (0)", "Buy (1)", "Sell (2)"]
-    counts = [action_history.count(i) for i in range(3)]
+    labels = ["Sell (-1)", "Hold (0)", "Buy (+1)"]
+    counts = [action_history.count(-1), action_history.count(0), action_history.count(1)]
     fig, ax = plt.subplots(figsize=(5, 3))
     bars = ax.bar(labels, counts, color=["#aec6e8", "#77c77a", "#f28b82"])
     ax.set_title("Action Distribution")
@@ -352,7 +369,7 @@ def plot_price_with_signals(test_df, action_history, time_axis, use_datetime):
     x = np.array(time_axis[: len(action_history)])
 
     buy_steps  = [i for i, a in enumerate(action_history) if a == 1]
-    sell_steps = [i for i, a in enumerate(action_history) if a == 2]
+    sell_steps = [i for i, a in enumerate(action_history) if a == -1]
 
     fig, ax = plt.subplots(figsize=(10, 4))
     ax.plot(x, prices, color="gray", linewidth=1, label="Close Price")
@@ -375,7 +392,7 @@ def plot_price_with_regime_overlay(test_df, action_history, time_axis, use_datet
     regimes = test_df["market_regime"].values[: len(action_history)] if "market_regime" in test_df.columns else None
 
     buy_steps = [i for i, a in enumerate(action_history) if a == 1]
-    sell_steps = [i for i, a in enumerate(action_history) if a == 2]
+    sell_steps = [i for i, a in enumerate(action_history) if a == -1]
 
     fig, ax = plt.subplots(figsize=(10, 4))
 
@@ -407,6 +424,141 @@ def plot_price_with_regime_overlay(test_df, action_history, time_axis, use_datet
     return fig
 
 
+def _calc_hold_stats(action_history):
+    # Non-zero action implies an executed trade. Hold length is bars between trades.
+    trade_steps = [i for i, a in enumerate(action_history) if a != 0]
+    if len(trade_steps) < 2:
+        return 0, 0
+    gaps = np.diff(trade_steps)
+    return int(np.round(np.mean(gaps))), int(np.max(gaps))
+
+
+def plot_performance_dashboard(equity_curve, buy_hold_curve, time_axis, use_datetime, action_history):
+    eq = np.asarray(equity_curve, dtype=np.float64)
+    bh = np.asarray(buy_hold_curve[: len(eq)], dtype=np.float64)
+
+    eq_ret = eq[1:] / (eq[:-1] + 1e-8) - 1.0 if len(eq) > 2 else np.array([0.0])
+    bh_ret = bh[1:] / (bh[:-1] + 1e-8) - 1.0 if len(bh) > 2 else np.array([0.0])
+
+    ann_factor = np.sqrt(252)
+    annual_return = (eq[-1] / (eq[0] + 1e-8) - 1.0) * 100.0
+    alpha = (eq_ret.mean() - bh_ret.mean()) * 252 * 100.0
+    beta = float(np.cov(eq_ret, bh_ret)[0, 1] / (np.var(bh_ret) + 1e-8)) if len(eq_ret) > 3 else 0.0
+    avg_hold, max_hold = _calc_hold_stats(action_history)
+
+    if use_datetime:
+        dt = pd.to_datetime(time_axis[: len(eq)], errors="coerce")
+        years = pd.Series(dt).dt.year.fillna(method="ffill").fillna(0).astype(int)
+    else:
+        # Fallback pseudo-years for non-datetime index.
+        years = pd.Series(np.floor(np.linspace(2020, 2020 + len(eq) / 250, len(eq))).astype(int))
+
+    years_unique = [y for y in sorted(years.unique()) if y > 0]
+    yearly_returns = []
+    for y in years_unique:
+        idx = np.where(years.values == y)[0]
+        if len(idx) < 2:
+            yearly_returns.append(0.0)
+        else:
+            r = eq[idx[-1]] / (eq[idx[0]] + 1e-8) - 1.0
+            yearly_returns.append(float(r * 100.0))
+
+    fig = plt.figure(figsize=(12, 8), facecolor="#111325")
+    gs = fig.add_gridspec(12, 24)
+
+    # Top KPI cards
+    ax_cards = fig.add_subplot(gs[0:3, :])
+    ax_cards.set_facecolor("#111325")
+    ax_cards.axis("off")
+
+    card_labels = ["年度回報", "Alpha", "Beta", "平均持有", "最多持有"]
+    card_values = [
+        f"{annual_return:+.1f}%",
+        f"{alpha:+.1f}%",
+        f"{beta:.2f}",
+        f"{avg_hold} 檔",
+        f"{max_hold} 檔",
+    ]
+    card_flags = [annual_return > 0, alpha > 0, beta < 1.0, avg_hold >= 5, max_hold >= avg_hold]
+
+    n = len(card_labels)
+    for i in range(n):
+        x0 = 0.02 + i * (0.96 / n)
+        w = 0.96 / n - 0.01
+        rect = patches.FancyBboxPatch(
+            (x0, 0.12),
+            w,
+            0.76,
+            boxstyle="round,pad=0.012,rounding_size=0.02",
+            linewidth=0.8,
+            edgecolor="#3A3E60",
+            facecolor="#161934",
+            transform=ax_cards.transAxes,
+        )
+        ax_cards.add_patch(rect)
+
+        icon = "✓" if card_flags[i] else "✕"
+        icon_color = "#63F5DD" if card_flags[i] else "#FF6B6B"
+        ax_cards.text(x0 + 0.03, 0.72, icon, color=icon_color, fontsize=12, weight="bold", transform=ax_cards.transAxes)
+        ax_cards.text(x0 + 0.06, 0.70, card_labels[i], color="#D8DCEC", fontsize=12, transform=ax_cards.transAxes)
+        ax_cards.text(x0 + 0.02, 0.36, card_values[i], color="#EEF1FF", fontsize=22, weight="bold", transform=ax_cards.transAxes)
+
+    # Main performance chart
+    ax_main = fig.add_subplot(gs[3:9, :])
+    ax_main.set_facecolor("#161934")
+    ax_main.plot(eq, color="#7B6DFF", linewidth=2.2, label="SMC-PPO")
+    ax_main.plot(bh, color="#A7ACBD", linewidth=2.0, alpha=0.9, label="Buy & Hold")
+
+    ax_main.set_title("歷史績效", loc="left", color="#ECEFFF", fontsize=24, fontweight="bold", pad=12)
+    ax_main.tick_params(colors="#B7BDCF", labelsize=10)
+    for spine in ax_main.spines.values():
+        spine.set_color("#3A3E60")
+    ax_main.grid(True, color="#2A2F4F", alpha=0.4)
+
+    eq_pct = (eq / (eq[0] + 1e-8) - 1.0) * 100
+    bh_pct = (bh / (bh[0] + 1e-8) - 1.0) * 100
+    ax_right = ax_main.twinx()
+    ax_right.set_ylim(ax_main.get_ylim())
+    ax_right.set_yticks(np.linspace(ax_main.get_ylim()[0], ax_main.get_ylim()[1], 5))
+    ax_right.set_yticklabels([f"{v:.2f}%" for v in np.linspace(eq_pct.min(), eq_pct.max(), 5)], color="#9FA5BB")
+    for spine in ax_right.spines.values():
+        spine.set_visible(False)
+
+    ax_main.annotate(
+        f"{eq_pct[-1]:.2f}%",
+        xy=(len(eq) - 1, eq[-1]),
+        xytext=(-40, 0),
+        textcoords="offset points",
+        color="white",
+        bbox=dict(boxstyle="round,pad=0.2", fc="#7B6DFF", ec="none", alpha=0.95),
+    )
+    ax_main.annotate(
+        f"{bh_pct[-1]:.2f}%",
+        xy=(len(bh) - 1, bh[-1]),
+        xytext=(-40, -10),
+        textcoords="offset points",
+        color="white",
+        bbox=dict(boxstyle="round,pad=0.2", fc="#8A8E9C", ec="none", alpha=0.95),
+    )
+
+    # Annual return strip
+    ax_strip = fig.add_subplot(gs[9:12, :])
+    ax_strip.set_facecolor("#161934")
+    ax_strip.set_xlim(0, max(1, len(years_unique)))
+    ax_strip.set_ylim(0, 1)
+    ax_strip.axis("off")
+
+    for i, (year, ret) in enumerate(zip(years_unique, yearly_returns)):
+        color = "#A83A72" if ret >= 0 else "#4B4FA4"
+        rect = patches.Rectangle((i + 0.02, 0.20), 0.96, 0.26, facecolor=color, edgecolor="none", alpha=0.95)
+        ax_strip.add_patch(rect)
+        ax_strip.text(i + 0.5, 0.58, f"{year}", ha="center", va="center", color="#D8DCEC", fontsize=10)
+        ax_strip.text(i + 0.5, 0.33, f"{ret:.1f}%", ha="center", va="center", color="#F3F5FF", fontsize=12, weight="bold")
+
+    fig.tight_layout(pad=1.1)
+    return fig
+
+
 def compute_advanced_metrics(equity_curve, action_history):
     equity = np.array(equity_curve, dtype=np.float64)
     if len(equity) < 3:
@@ -428,7 +580,7 @@ def compute_advanced_metrics(equity_curve, action_history):
     max_drawdown_abs = abs(drawdown.min())
     calmar = cumulative_return / (max_drawdown_abs + 1e-8)
 
-    trade_count = int(sum(1 for a in action_history if a in (1, 2)))
+    trade_count = int(sum(1 for a in action_history if a != 0))
     trade_density = trade_count / max(len(action_history), 1)
 
     return {
@@ -479,42 +631,38 @@ def get_regime_thresholds(regime: str, base_threshold: float, strictness_multipl
 
 
 def infer_next_signal(model, df: pd.DataFrame, feature_cols: list, current_regime: str, base_threshold: float, strictness_multiplier: float):
-    # Use the latest engineered features plus a neutral portfolio state as next-period input.
+    # Continuous-action inference with regime gating.
     feats = df[feature_cols].values.astype(np.float32)
     feat_mean = feats.mean(axis=0, keepdims=True)
     feat_std = feats.std(axis=0, keepdims=True) + 1e-8
     latest_feat = ((feats[-1:] - feat_mean) / feat_std).astype(np.float32)[0]
 
-    agent_state = np.array([0.0, 1.0, 1.0], dtype=np.float32)  # position=0, balance=1x, net_worth=1x
+    agent_state = np.array([0.0, 1.0, 1.0, 0.0], dtype=np.float32)
     obs = np.concatenate([latest_feat, agent_state], axis=0).astype(np.float32).reshape(1, -1)
 
     action, _ = model.predict(obs, deterministic=True)
-
-    obs_tensor, _ = model.policy.obs_to_tensor(obs)
-    dist = model.policy.get_distribution(obs_tensor)
-    probs = dist.distribution.probs.detach().cpu().numpy()[0]
-
-    action_idx = int(np.asarray(action).reshape(-1)[0])
-    action_map = {0: "Hold", 1: "Buy", 2: "Sell"}
+    raw_action = float(np.asarray(action).reshape(-1)[0])
 
     regime_thresholds = get_regime_thresholds(current_regime, base_threshold, strictness_multiplier)
-    buy_prob = float(probs[1])
-    sell_prob = float(probs[2])
+    buy_score = max(0.0, raw_action)
+    sell_score = max(0.0, -raw_action)
 
-    if buy_prob >= regime_thresholds["buy"] and buy_prob > sell_prob:
+    if buy_score >= regime_thresholds["buy"] and buy_score > sell_score:
         gated_action = 1
-    elif sell_prob >= regime_thresholds["sell"] and sell_prob > buy_prob:
-        gated_action = 2
+    elif sell_score >= regime_thresholds["sell"] and sell_score > buy_score:
+        gated_action = -1
     else:
         gated_action = 0
 
+    label_map = {1: "Buy", -1: "Sell", 0: "Hold"}
+
     return {
         "action": gated_action,
-        "label": action_map.get(gated_action, "Hold"),
-        "raw_action": action_idx,
-        "raw_label": action_map.get(action_idx, "Hold"),
-        "confidence": float(np.max(probs)),
-        "probs": probs,
+        "label": label_map.get(gated_action, "Hold"),
+        "raw_action": raw_action,
+        "raw_label": "Buy" if raw_action > 0.05 else ("Sell" if raw_action < -0.05 else "Hold"),
+        "confidence": float(abs(raw_action)),
+        "scores": np.array([sell_score, buy_score], dtype=np.float32),
         "thresholds": regime_thresholds,
     }
 
@@ -542,6 +690,9 @@ def run_walk_forward_backtest(
     max_drawdown_limit: float,
     daily_loss_limit: float,
     volatility_target: float,
+    action_threshold: float,
+    lambda_downside: float,
+    eta_trade_penalty: float,
 ):
     rows = []
     fold = 0
@@ -572,13 +723,16 @@ def run_walk_forward_backtest(
                 max_drawdown_limit=max_drawdown_limit,
                 daily_loss_limit=daily_loss_limit,
                 volatility_target=volatility_target,
+                action_threshold=action_threshold,
+                lambda_downside=lambda_downside,
+                eta_trade_penalty=eta_trade_penalty,
             )
 
         train_env = DummyVecEnv([make_train_env])
         model = PPO(
             policy="MlpPolicy",
             env=train_env,
-            learning_rate=5e-4,
+            learning_rate=1e-4,
             n_steps=1024,
             batch_size=32,
             n_epochs=10,
@@ -589,6 +743,7 @@ def run_walk_forward_backtest(
             verbose=0,
             device="auto",
             seed=100 + fold,
+            policy_kwargs=build_attention_policy_kwargs(market_feature_dim=len(feature_cols), agent_state_dim=4),
         )
         model.learn(total_timesteps=int(timesteps_per_fold))
 
@@ -611,6 +766,9 @@ def run_walk_forward_backtest(
             max_drawdown_limit=max_drawdown_limit,
             daily_loss_limit=daily_loss_limit,
             volatility_target=volatility_target,
+            action_threshold=action_threshold,
+            lambda_downside=lambda_downside,
+            eta_trade_penalty=eta_trade_penalty,
         )
 
         metrics, equity_curve, action_history, _ = evaluate_agent(model, test_env)
@@ -654,6 +812,9 @@ def run_cost_stress_test(
     max_drawdown_limit: float,
     daily_loss_limit: float,
     volatility_target: float,
+    action_threshold: float,
+    lambda_downside: float,
+    eta_trade_penalty: float,
 ):
     scenarios = [
         ("Base", trade_fee, slippage_bps, spread_bps),
@@ -683,6 +844,9 @@ def run_cost_stress_test(
             max_drawdown_limit=max_drawdown_limit,
             daily_loss_limit=daily_loss_limit,
             volatility_target=volatility_target,
+            action_threshold=action_threshold,
+            lambda_downside=lambda_downside,
+            eta_trade_penalty=eta_trade_penalty,
         )
         metrics, equity_curve, _, _ = evaluate_agent(model, env)
         rows.append(
@@ -715,6 +879,8 @@ if run_btn:
             st.info(f"快速模式已啟用：僅使用最近 {len(df)} 筆資料加速訓練。")
 
         feature_cols = build_feature_columns()
+        feature_cols = [c for c in feature_cols if c in df.columns]
+        vanilla_feature_cols = [c for c in build_vanilla_feature_columns() if c in df.columns]
 
         # 2) 切分
         split_idx = int(len(df) * train_split)
@@ -747,6 +913,9 @@ if run_btn:
                 max_drawdown_limit=max_drawdown_limit,
                 daily_loss_limit=daily_loss_limit,
                 volatility_target=volatility_target,
+                action_threshold=action_threshold,
+                lambda_downside=lambda_downside,
+                eta_trade_penalty=eta_trade_penalty,
             )
 
         train_env = DummyVecEnv([make_train_env])
@@ -766,9 +935,7 @@ if run_btn:
 
         if not model_loaded:
             with st.spinner(f"訓練 PPO 模型中（{effective_timesteps:,} 步）..."):
-                policy_kwargs = dict(
-                    net_arch=[256, 256, 128],
-                )
+                policy_kwargs = build_attention_policy_kwargs(market_feature_dim=len(feature_cols), agent_state_dim=4)
 
                 if performance_mode == "快速模式":
                     n_steps = 512
@@ -782,14 +949,14 @@ if run_btn:
                 model = PPO(
                     policy="MlpPolicy",
                     env=train_env,
-                    learning_rate=5e-4,
+                    learning_rate=1e-4,
                     n_steps=n_steps,
                     batch_size=batch_size,
                     n_epochs=n_epochs,
                     gamma=0.99,
                     gae_lambda=0.95,
                     clip_range=0.2,
-                    ent_coef=0.02,
+                    ent_coef=0.01,
                     verbose=0,
                     device="auto",
                     policy_kwargs=policy_kwargs,
@@ -820,6 +987,9 @@ if run_btn:
             max_drawdown_limit=max_drawdown_limit,
             daily_loss_limit=daily_loss_limit,
             volatility_target=volatility_target,
+            action_threshold=action_threshold,
+            lambda_downside=lambda_downside,
+            eta_trade_penalty=eta_trade_penalty,
         )
         metrics, equity_curve, action_history, trade_log = evaluate_agent(model, test_env)
 
@@ -845,11 +1015,62 @@ if run_btn:
                 max_drawdown_limit=max_drawdown_limit,
                 daily_loss_limit=daily_loss_limit,
                 volatility_target=volatility_target,
+                action_threshold=action_threshold,
+                lambda_downside=lambda_downside,
+                eta_trade_penalty=eta_trade_penalty,
             )
 
         # Buy & Hold baseline
         test_prices = test_df["Close"].values
         buy_hold_curve = float(initial_balance) * (test_prices / test_prices[0])
+
+        benchmark_df = None
+        if run_benchmark_suite and performance_mode == "完整模式":
+            with st.spinner("執行三基準對標（B&H / 動能 / Vanilla PPO）..."):
+                env_kwargs = {
+                    "initial_balance": float(initial_balance),
+                    "trade_fee": trade_fee,
+                    "slippage_bps": slippage_bps,
+                    "spread_bps": spread_bps,
+                    "maker_fee": maker_fee,
+                    "taker_fee": taker_fee,
+                    "min_trade_pct": min_trade_pct,
+                    "min_notional": min_notional,
+                    "min_qty": min_qty,
+                    "qty_step": qty_step,
+                    "price_step": price_step,
+                    "position_step": float(position_step),
+                    "slippage_vol_multiplier": slippage_vol_multiplier,
+                    "max_drawdown_limit": max_drawdown_limit,
+                    "daily_loss_limit": daily_loss_limit,
+                    "volatility_target": volatility_target,
+                    "action_threshold": action_threshold,
+                    "lambda_downside": lambda_downside,
+                    "eta_trade_penalty": eta_trade_penalty,
+                    "allow_short": True,
+                }
+                _, vanilla_metrics, _, _, _ = run_ppo_baseline(
+                    train_df=train_df,
+                    test_df=test_df,
+                    feature_cols=vanilla_feature_cols,
+                    env_kwargs=env_kwargs,
+                    total_timesteps=min(effective_timesteps, 80_000),
+                    lr=1e-4,
+                    seed=99,
+                    use_attention=False,
+                )
+                momentum_metrics = evaluate_momentum_baseline(test_df, initial_balance=float(initial_balance), fee_rate=trade_fee)
+                buy_hold_metrics = compute_metrics(list(buy_hold_curve[: len(equity_curve)]))
+
+                benchmark_df = pd.DataFrame(
+                    [
+                        {"Model": "SMC-PPO", "CumulativeReturn": metrics["cumulative_return"], "Sharpe": metrics["sharpe_ratio"], "Sortino": metrics.get("sortino_ratio", 0.0), "MaxDrawdown": metrics["max_drawdown"]},
+                        {"Model": "Vanilla PPO", "CumulativeReturn": vanilla_metrics["cumulative_return"], "Sharpe": vanilla_metrics["sharpe_ratio"], "Sortino": vanilla_metrics.get("sortino_ratio", 0.0), "MaxDrawdown": vanilla_metrics["max_drawdown"]},
+                        {"Model": "Momentum(MACD+MA)", "CumulativeReturn": momentum_metrics["cumulative_return"], "Sharpe": momentum_metrics["sharpe_ratio"], "Sortino": momentum_metrics.get("sortino_ratio", 0.0), "MaxDrawdown": momentum_metrics["max_drawdown"]},
+                        {"Model": "Buy&Hold", "CumulativeReturn": buy_hold_metrics["cumulative_return"], "Sharpe": buy_hold_metrics["sharpe_ratio"], "Sortino": buy_hold_metrics.get("sortino_ratio", 0.0), "MaxDrawdown": buy_hold_metrics["max_drawdown"]},
+                    ]
+                )
+
         time_axis, use_datetime = get_time_axis(test_df, len(equity_curve))
 
         # 6) 指標顯示
@@ -891,13 +1112,23 @@ if run_btn:
         s1, s2, s3, s4 = st.columns(4)
         s1.metric("建議動作", next_signal["label"])
         s2.metric("信心分數", f"{next_signal['confidence'] * 100:.1f} %")
-        s3.metric("Buy 機率", f"{next_signal['probs'][1] * 100:.1f} %")
-        s4.metric("Sell 機率", f"{next_signal['probs'][2] * 100:.1f} %")
+        s3.metric("Buy 分數", f"{next_signal['scores'][1] * 100:.1f} %")
+        s4.metric("Sell 分數", f"{next_signal['scores'][0] * 100:.1f} %")
         st.caption(
-            f"原始策略動作: {next_signal['raw_label']}｜"
+            f"原始連續動作: {next_signal['raw_action']:.3f}（{next_signal['raw_label']}）｜"
             f"Regime 閾值 Buy>={next_signal['thresholds']['buy'] * 100:.1f}% / "
             f"Sell>={next_signal['thresholds']['sell'] * 100:.1f}%"
         )
+
+        if benchmark_df is not None:
+            st.subheader("🧭 多基準對標結果")
+            st.dataframe(benchmark_df, use_container_width=True)
+
+        if run_shap_analysis and performance_mode == "完整模式":
+            st.subheader("🔬 SMC 因子貢獻（SHAP/Permutation）")
+            obs_matrix = test_env.features
+            shap_df = explain_actor_with_shap(model, obs_matrix, feature_cols, max_samples=180)
+            st.dataframe(shap_df.head(20), use_container_width=True)
 
         # 6-2) 進階風險指標
         adv = compute_advanced_metrics(equity_curve, action_history)
@@ -929,6 +1160,9 @@ if run_btn:
             st.info("此訊號對應下一根 K 棒（你目前使用的是 1h 週期）。")
 
         # 7) 圖表
+        st.subheader("🧩 歷史績效儀表板")
+        st.pyplot(plot_performance_dashboard(equity_curve, buy_hold_curve, time_axis, use_datetime, action_history))
+
         st.subheader("📈 資產曲線")
         st.pyplot(plot_equity_curve(equity_curve, buy_hold_curve, time_axis, use_datetime))
 
@@ -983,6 +1217,9 @@ if run_btn:
                     max_drawdown_limit=max_drawdown_limit,
                     daily_loss_limit=daily_loss_limit,
                     volatility_target=volatility_target,
+                    action_threshold=action_threshold,
+                    lambda_downside=lambda_downside,
+                    eta_trade_penalty=eta_trade_penalty,
                 )
 
             if not wf_df.empty:
@@ -1019,9 +1256,9 @@ else:
 | 模組 | 說明 |
 |------|------|
 | **資料來源** | yfinance 下載 BTC-USD 歷史 K 棒，或自行上傳 CSV |
-| **特徵工程** | MA5/10/20、RSI(14)、MACD、波動率、成交量比等 13 個指標 |
-| **交易環境** | 自定義 Gymnasium Env，離散動作：Hold / Buy / Sell |
-| **RL 演算法** | Stable-Baselines3 **PPO**（MlpPolicy） |
+| **特徵工程** | 技術指標 + SMC（BOS/FVG/Liquidity Sweep）+ MTF（1H/4H）因果對齊 |
+| **交易環境** | 自定義 Gymnasium Env，連續動作 $A_t \in [-1,1]$ + 動作閾值執行 |
+| **RL 演算法** | Stable-Baselines3 **PPO**（Actor-Critic + Attention extractor） |
 | **評估指標** | 累積報酬率、Sharpe Ratio、最大回撤、對比 Buy & Hold 基準 |
 """)
 
