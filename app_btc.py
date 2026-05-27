@@ -1,8 +1,8 @@
 # app_btc.py
 # -*- coding: utf-8 -*-
 """
-Bitcoin RL Trading (PPO) — Streamlit 互動介面
-執行方式：streamlit run app_btc.py
+Bitcoin RL Trading (PPO) - Streamlit UI
+Run with: streamlit run app_btc.py
 """
 
 import warnings
@@ -103,74 +103,74 @@ def cjk_text_kwargs(**kwargs):
     return kwargs
 
 # ──────────────────────────────────────────────
-# 頁面設定
+# Page setup
 # ──────────────────────────────────────────────
 st.set_page_config(
-    page_title="Bitcoin RL 交易模型",
+    page_title="Bitcoin RL Trading Model",
     page_icon="₿",
     layout="wide",
 )
 
-st.title("₿ 比特幣強化學習交易模型（PPO）")
+st.title("₿ Bitcoin Reinforcement Learning Trading Model (PPO)")
 st.markdown(
-    "使用 **Proximal Policy Optimization (PPO)** 訓練 BTC 交易代理人，"
-    "自動學習買入 / 賣出 / 持倉策略。"
+    "Train a BTC trading agent with **Proximal Policy Optimization (PPO)**, "
+    "and learn buy / sell / hold strategies automatically."
 )
 
 # ──────────────────────────────────────────────
-# 側邊欄：資料 & 超參數
+# Sidebar: data & hyperparameters
 # ──────────────────────────────────────────────
 with st.sidebar:
-    st.header("⚙️ 參數設定")
+    st.header("⚙️ Settings")
 
-    st.subheader("資料來源")
+    st.subheader("Data Source")
     data_source = st.radio(
-        "選擇資料方式",
-        ["從 yfinance 下載", "上傳 CSV 檔案"],
+        "Choose a data source",
+        ["Download from yfinance", "Upload CSV file"],
         index=0,
     )
 
     yf_period = st.selectbox(
-        "下載期間",
+        "Download period",
         ["1y", "2y", "5y", "max"],
         index=1,
     )
     yf_interval = st.selectbox(
-        "K 棒週期",
+        "Bar interval",
         ["1d", "1h"],
         index=0,
     )
 
     uploaded_file = None
-    if data_source == "上傳 CSV 檔案":
-        uploaded_file = st.file_uploader("上傳 CSV（需含 Open/High/Low/Close/Volume）", type=["csv"])
+    if data_source == "Upload CSV file":
+        uploaded_file = st.file_uploader("Upload CSV (must include Open/High/Low/Close/Volume)", type=["csv"])
 
     st.divider()
 
-    st.subheader("訓練超參數")
-    initial_balance = st.number_input("初始資金（USD）", value=10000, min_value=100, step=500)
-    trade_fee = st.slider("交易手續費", min_value=0.0, max_value=0.01, value=0.001, step=0.0005, format="%.4f")
+    st.subheader("Training Hyperparameters")
+    initial_balance = st.number_input("Initial balance (USD)", value=10000, min_value=100, step=500)
+    trade_fee = st.slider("Trading fee", min_value=0.0, max_value=0.01, value=0.001, step=0.0005, format="%.4f")
     total_timesteps = st.select_slider(
-        "訓練總步數",
+        "Total training timesteps",
         options=[50_000, 100_000, 200_000, 300_000, 500_000],
         value=200_000,
     )
-    train_split = st.slider("訓練集比例", min_value=0.5, max_value=0.9, value=0.8, step=0.05)
+    train_split = st.slider("Training split ratio", min_value=0.5, max_value=0.9, value=0.8, step=0.05)
 
     st.divider()
-    st.subheader("⚡ 執行速度")
+    st.subheader("⚡ Execution Speed")
     performance_mode = st.radio(
-        "執行模式",
-        ["快速模式", "完整模式"],
+        "Run mode",
+        ["Fast mode", "Full mode"],
         index=0,
         horizontal=True,
     )
-    use_saved_model = st.checkbox("優先載入既有模型（若存在）", value=True)
-    run_stress_test = st.checkbox("啟用成本壓力測試", value=(performance_mode == "完整模式"))
-    run_benchmark_suite = st.checkbox("啟用三基準對標（B&H/動能/Vanilla PPO）", value=(performance_mode == "完整模式"))
-    run_shap_analysis = st.checkbox("啟用 SHAP/特徵貢獻分析", value=False)
-    if performance_mode == "快速模式":
-        fast_max_bars = st.number_input("快速模式最大資料筆數", min_value=300, max_value=3000, value=900, step=100)
+    use_saved_model = st.checkbox("Prefer loading an existing model if available", value=True)
+    run_stress_test = st.checkbox("Enable cost stress test", value=(performance_mode == "Full mode"))
+    run_benchmark_suite = st.checkbox("Enable benchmark suite (B&H / Momentum / Vanilla PPO)", value=(performance_mode == "Full mode"))
+    run_shap_analysis = st.checkbox("Enable SHAP / feature contribution analysis", value=False)
+    if performance_mode == "Fast mode":
+        fast_max_bars = st.number_input("Max bars in fast mode", min_value=300, max_value=3000, value=900, step=100)
     else:
         fast_max_bars = 3000
 
@@ -210,97 +210,97 @@ with st.sidebar:
     if "strictness_multiplier" not in st.session_state:
         st.session_state.strictness_multiplier = 1.15
     if "strategy_preset" not in st.session_state:
-        st.session_state.strategy_preset = "平衡"
+        st.session_state.strategy_preset = "Balanced"
 
     ui_mode = st.radio(
-        "參數模式",
-        ["自動模式", "進階模式"],
+        "Parameter mode",
+        ["Auto mode", "Advanced mode"],
         index=0,
         horizontal=True,
     )
 
-    st.subheader("🎛️ 策略風格")
-    st.caption("一鍵預設（保守 / 平衡 / 積極）")
+    st.subheader("🎛️ Strategy Style")
+    st.caption("One-click presets: Conservative / Balanced / Aggressive")
     p1, p2, p3 = st.columns(3)
-    if p1.button("保守", use_container_width=True):
+    if p1.button("Conservative", use_container_width=True):
         st.session_state.base_threshold = 0.62
         st.session_state.strictness_multiplier = 1.30
         st.session_state.min_trade_pct = 0.03
         st.session_state.position_step = 0.20
         st.session_state.enable_walk_forward = False
-        st.session_state.strategy_preset = "保守"
-    if p2.button("平衡", use_container_width=True):
+        st.session_state.strategy_preset = "Conservative"
+    if p2.button("Balanced", use_container_width=True):
         st.session_state.base_threshold = 0.55
         st.session_state.strictness_multiplier = 1.15
         st.session_state.min_trade_pct = 0.02
         st.session_state.position_step = 0.25
         st.session_state.enable_walk_forward = False
-        st.session_state.strategy_preset = "平衡"
-    if p3.button("積極", use_container_width=True):
+        st.session_state.strategy_preset = "Balanced"
+    if p3.button("Aggressive", use_container_width=True):
         st.session_state.base_threshold = 0.48
         st.session_state.strictness_multiplier = 1.05
         st.session_state.min_trade_pct = 0.01
         st.session_state.position_step = 0.33
         st.session_state.enable_walk_forward = False
-        st.session_state.strategy_preset = "積極"
+        st.session_state.strategy_preset = "Aggressive"
 
-    if ui_mode == "自動模式":
+    if ui_mode == "Auto mode":
         st.info(
-            f"目前使用 {st.session_state.strategy_preset} 預設："
-            f"Regime 門檻 {st.session_state.base_threshold:.2f} / "
-            f"高波動倍數 {st.session_state.strictness_multiplier:.2f} / "
-            f"調倉步長 {st.session_state.position_step:.2f}"
+            f"Currently using the {st.session_state.strategy_preset} preset: "
+            f"Regime threshold {st.session_state.base_threshold:.2f} / "
+            f"high-volatility multiplier {st.session_state.strictness_multiplier:.2f} / "
+            f"rebalance step {st.session_state.position_step:.2f}"
         )
     else:
         st.divider()
-        st.subheader("🏦 現實市場設定")
-        st.session_state.slippage_bps = st.slider("基礎滑價（bps）", min_value=0.0, max_value=30.0, value=float(st.session_state.slippage_bps), step=1.0)
-        st.session_state.spread_bps = st.slider("買賣價差（bps）", min_value=0.0, max_value=20.0, value=float(st.session_state.spread_bps), step=1.0)
-        st.session_state.maker_fee = st.slider("Maker 費率", min_value=0.0, max_value=0.0020, value=float(st.session_state.maker_fee), step=0.0001, format="%.4f")
-        st.session_state.taker_fee = st.slider("Taker 費率", min_value=0.0, max_value=0.0030, value=float(st.session_state.taker_fee), step=0.0001, format="%.4f")
-        st.session_state.min_trade_pct = st.slider("最小成交比例", min_value=0.0, max_value=0.10, value=float(st.session_state.min_trade_pct), step=0.005)
-        st.session_state.min_notional = st.number_input("最小名目金額（USD）", min_value=1.0, value=float(st.session_state.min_notional), step=1.0)
-        st.session_state.min_qty = st.number_input("最小下單數量（BTC）", min_value=0.00001, value=float(st.session_state.min_qty), step=0.00001, format="%.5f")
-        st.session_state.qty_step = st.number_input("下單數量精度步進", min_value=0.00001, value=float(st.session_state.qty_step), step=0.00001, format="%.5f")
-        st.session_state.price_step = st.number_input("價格精度步進", min_value=0.01, value=float(st.session_state.price_step), step=0.01)
-        st.session_state.position_step = st.select_slider("單次調倉步長", options=[0.10, 0.20, 0.25, 0.33, 0.50], value=float(st.session_state.position_step))
-        st.session_state.slippage_vol_multiplier = st.slider("高波動滑價放大倍數", min_value=0.0, max_value=3.0, value=float(st.session_state.slippage_vol_multiplier), step=0.1)
-        st.session_state.volatility_target = st.slider("波動目標（風險縮放）", min_value=0.005, max_value=0.05, value=float(st.session_state.volatility_target), step=0.001, format="%.3f")
-        st.session_state.action_threshold = st.slider("動作平滑閾值 |ΔA|", min_value=0.01, max_value=0.30, value=float(st.session_state.action_threshold), step=0.01)
-        st.session_state.lambda_downside = st.slider("下行風險權重 λ", min_value=0.01, max_value=0.30, value=float(st.session_state.lambda_downside), step=0.01)
-        st.session_state.eta_trade_penalty = st.slider("調倉懲罰權重 η", min_value=0.0005, max_value=0.02, value=float(st.session_state.eta_trade_penalty), step=0.0005, format="%.4f")
+        st.subheader("🏦 Realistic Market Settings")
+        st.session_state.slippage_bps = st.slider("Base slippage (bps)", min_value=0.0, max_value=30.0, value=float(st.session_state.slippage_bps), step=1.0)
+        st.session_state.spread_bps = st.slider("Bid-ask spread (bps)", min_value=0.0, max_value=20.0, value=float(st.session_state.spread_bps), step=1.0)
+        st.session_state.maker_fee = st.slider("Maker fee", min_value=0.0, max_value=0.0020, value=float(st.session_state.maker_fee), step=0.0001, format="%.4f")
+        st.session_state.taker_fee = st.slider("Taker fee", min_value=0.0, max_value=0.0030, value=float(st.session_state.taker_fee), step=0.0001, format="%.4f")
+        st.session_state.min_trade_pct = st.slider("Minimum trade size ratio", min_value=0.0, max_value=0.10, value=float(st.session_state.min_trade_pct), step=0.005)
+        st.session_state.min_notional = st.number_input("Minimum notional (USD)", min_value=1.0, value=float(st.session_state.min_notional), step=1.0)
+        st.session_state.min_qty = st.number_input("Minimum order size (BTC)", min_value=0.00001, value=float(st.session_state.min_qty), step=0.00001, format="%.5f")
+        st.session_state.qty_step = st.number_input("Quantity step", min_value=0.00001, value=float(st.session_state.qty_step), step=0.00001, format="%.5f")
+        st.session_state.price_step = st.number_input("Price step", min_value=0.01, value=float(st.session_state.price_step), step=0.01)
+        st.session_state.position_step = st.select_slider("Rebalance step", options=[0.10, 0.20, 0.25, 0.33, 0.50], value=float(st.session_state.position_step))
+        st.session_state.slippage_vol_multiplier = st.slider("High-volatility slippage multiplier", min_value=0.0, max_value=3.0, value=float(st.session_state.slippage_vol_multiplier), step=0.1)
+        st.session_state.volatility_target = st.slider("Volatility target (risk scaling)", min_value=0.005, max_value=0.05, value=float(st.session_state.volatility_target), step=0.001, format="%.3f")
+        st.session_state.action_threshold = st.slider("Action smoothing threshold |ΔA|", min_value=0.01, max_value=0.30, value=float(st.session_state.action_threshold), step=0.01)
+        st.session_state.lambda_downside = st.slider("Downside risk weight λ", min_value=0.01, max_value=0.30, value=float(st.session_state.lambda_downside), step=0.01)
+        st.session_state.eta_trade_penalty = st.slider("Rebalance penalty weight η", min_value=0.0005, max_value=0.02, value=float(st.session_state.eta_trade_penalty), step=0.0005, format="%.4f")
 
         st.divider()
-        st.subheader("🛑 風險引擎")
-        st.session_state.max_drawdown_limit = st.slider("最大回撤停機線", min_value=0.10, max_value=0.60, value=float(st.session_state.max_drawdown_limit), step=0.01)
-        st.session_state.daily_loss_limit = st.slider("單次回測虧損停機線", min_value=0.02, max_value=0.30, value=float(st.session_state.daily_loss_limit), step=0.01)
+        st.subheader("🛑 Risk Engine")
+        st.session_state.max_drawdown_limit = st.slider("Max drawdown stop line", min_value=0.10, max_value=0.60, value=float(st.session_state.max_drawdown_limit), step=0.01)
+        st.session_state.daily_loss_limit = st.slider("Per-run loss stop line", min_value=0.02, max_value=0.30, value=float(st.session_state.daily_loss_limit), step=0.01)
 
         st.divider()
-        st.subheader("🧪 Walk-forward 回測")
-        st.session_state.enable_walk_forward = st.checkbox("啟用 Walk-forward 滾動回測", value=bool(st.session_state.enable_walk_forward))
+        st.subheader("🧪 Walk-forward Backtest")
+        st.session_state.enable_walk_forward = st.checkbox("Enable walk-forward rolling backtest", value=bool(st.session_state.enable_walk_forward))
         if st.session_state.enable_walk_forward:
-            st.session_state.wf_train_window = int(st.number_input("每折訓練長度（bars）", min_value=120, value=int(st.session_state.wf_train_window), step=60))
-            st.session_state.wf_test_window = int(st.number_input("每折測試長度（bars）", min_value=48, value=int(st.session_state.wf_test_window), step=24))
-            st.session_state.wf_max_folds = int(st.number_input("最多折數", min_value=2, max_value=12, value=int(st.session_state.wf_max_folds), step=1))
+            st.session_state.wf_train_window = int(st.number_input("Train window per fold (bars)", min_value=120, value=int(st.session_state.wf_train_window), step=60))
+            st.session_state.wf_test_window = int(st.number_input("Test window per fold (bars)", min_value=48, value=int(st.session_state.wf_test_window), step=24))
+            st.session_state.wf_max_folds = int(st.number_input("Max folds", min_value=2, max_value=12, value=int(st.session_state.wf_max_folds), step=1))
             st.session_state.wf_timesteps = int(
                 st.select_slider(
-                    "每折訓練步數",
+                    "Timesteps per fold",
                     options=[10_000, 20_000, 30_000, 50_000, 80_000],
                     value=int(st.session_state.wf_timesteps),
                 )
             )
 
         st.divider()
-        st.subheader("🧠 Regime 門檻控制")
+        st.subheader("🧠 Regime Threshold Control")
         st.session_state.base_threshold = st.slider(
-            "基準信心閾值",
+            "Base confidence threshold",
             min_value=0.45,
             max_value=0.75,
             value=float(st.session_state.base_threshold),
             step=0.01,
         )
         st.session_state.strictness_multiplier = st.slider(
-            "高波動嚴格倍數",
+            "High-volatility strictness multiplier",
             min_value=1.0,
             max_value=1.4,
             value=float(st.session_state.strictness_multiplier),
@@ -334,10 +334,10 @@ with st.sidebar:
     strictness_multiplier = float(st.session_state.strictness_multiplier)
 
     st.divider()
-    run_btn = st.button("🚀 開始下載 & 訓練", use_container_width=True)
+    run_btn = st.button("🚀 Start Download & Train", use_container_width=True)
 
 # ──────────────────────────────────────────────
-# 主流程
+# Main flow
 # ──────────────────────────────────────────────
 CSV_PATH = "btc_usdt_1h.csv"
 MODEL_PATH = "ppo_btc_trading_agent"
@@ -360,31 +360,31 @@ def add_technical_indicators_cached(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def load_or_download_data() -> pd.DataFrame:
-    if data_source == "上傳 CSV 檔案" and uploaded_file is not None:
+    if data_source == "Upload CSV file" and uploaded_file is not None:
         try:
             df_raw = pd.read_csv(uploaded_file)
         except Exception as e:
-            st.error(f"❌ CSV 讀取失敗：{str(e)}")
+            st.error(f"❌ CSV read failed: {str(e)}")
             st.stop()
-    elif data_source == "從 yfinance 下載":
+    elif data_source == "Download from yfinance":
         try:
-            with st.spinner("正在從 yfinance 下載 BTC 資料...（可能需要 10-30 秒）"):
+            with st.spinner("Downloading BTC data from yfinance... (this may take 10-30 seconds)"):
                 df_raw = fetch_yfinance_cached(yf_interval, yf_period, CSV_PATH)
         except Exception as e:
             st.error(
-                f"❌ yfinance 下載失敗。\n\n"
-                f"**原因：** {str(e)}\n\n"
-                f"**建議：**\n"
-                f"1. 等待 1-2 分鐘後再試（API 限流）\n"
-                f"2. 改用「上傳 CSV 檔案」方式\n"
-                f"3. 使用更短的時間週期（例如 1y 而非 max）"
+                f"❌ yfinance download failed.\n\n"
+                f"**Reason:** {str(e)}\n\n"
+                f"**Suggestions:**\n"
+                f"1. Wait 1-2 minutes and try again (API rate limiting)\n"
+                f"2. Switch to the 'Upload CSV file' option\n"
+                f"3. Use a shorter period (for example 1y instead of max)"
             )
             st.stop()
     elif os.path.exists(CSV_PATH):
         df_raw = pd.read_csv(CSV_PATH)
-        st.info(f"✓ 讀取已存在的資料檔：{CSV_PATH}（{len(df_raw)} 筆）")
+        st.info(f"✓ Loaded existing data file: {CSV_PATH} ({len(df_raw)} rows)")
     else:
-        st.error("❌ 請選擇資料來源或上傳 CSV 後再執行。")
+        st.error("❌ Please choose a data source or upload a CSV before running.")
         st.stop()
 
     return df_raw
@@ -540,13 +540,13 @@ def plot_performance_dashboard(equity_curve, buy_hold_curve, time_axis, use_date
     ax_cards.set_facecolor("#111325")
     ax_cards.axis("off")
 
-    card_labels = ["年度回報", "Alpha", "Beta", "平均持有", "最多持有"]
+    card_labels = ["Annual Return", "Alpha", "Beta", "Avg Hold", "Max Hold"]
     card_values = [
         f"{annual_return:+.1f}%",
         f"{alpha:+.1f}%",
         f"{beta:.2f}",
-        f"{avg_hold} 檔",
-        f"{max_hold} 檔",
+        f"{avg_hold} bars",
+        f"{max_hold} bars",
     ]
     card_flags = [annual_return > 0, alpha > 0, beta < 1.0, avg_hold >= 5, max_hold >= avg_hold]
 
@@ -578,7 +578,7 @@ def plot_performance_dashboard(equity_curve, buy_hold_curve, time_axis, use_date
     ax_main.plot(eq, color="#7B6DFF", linewidth=2.2, label="SMC-PPO")
     ax_main.plot(bh, color="#A7ACBD", linewidth=2.0, alpha=0.9, label="Buy & Hold")
 
-    ax_main.set_title("歷史績效", loc="left", color="#ECEFFF", fontsize=24, fontweight="bold", pad=12, **cjk_text_kwargs())
+    ax_main.set_title("Historical Performance", loc="left", color="#ECEFFF", fontsize=24, fontweight="bold", pad=12, **cjk_text_kwargs())
     ax_main.tick_params(colors="#B7BDCF", labelsize=10)
     for spine in ax_main.spines.values():
         spine.set_color("#3A3E60")
@@ -932,36 +932,36 @@ def run_cost_stress_test(
 
 
 # ──────────────────────────────────────────────
-# 執行
+# Execution
 # ──────────────────────────────────────────────
 if run_btn:
     try:
-        # 1) 資料
+        # 1) Data
         df_raw = load_or_download_data()
 
-        with st.spinner("計算技術指標..."):
+        with st.spinner("Computing technical indicators..."):
             df = add_technical_indicators_cached(df_raw)
         df = add_market_regime_labels(df)
 
-        if performance_mode == "快速模式" and len(df) > int(fast_max_bars):
+        if performance_mode == "Fast mode" and len(df) > int(fast_max_bars):
             df = df.iloc[-int(fast_max_bars):].reset_index(drop=True)
-            st.info(f"快速模式已啟用：僅使用最近 {len(df)} 筆資料加速訓練。")
+            st.info(f"Fast mode enabled: only the most recent {len(df)} rows are used to speed up training.")
 
         feature_cols = build_feature_columns()
         feature_cols = [c for c in feature_cols if c in df.columns]
         vanilla_feature_cols = [c for c in build_vanilla_feature_columns() if c in df.columns]
 
-        # 2) 切分
+        # 2) Split data
         split_idx = int(len(df) * train_split)
         train_df = df.iloc[:split_idx].reset_index(drop=True)
         test_df  = df.iloc[split_idx:].reset_index(drop=True)
 
         col1, col2, col3 = st.columns(3)
-        col1.metric("總資料筆數", len(df))
-        col2.metric("訓練集", len(train_df))
-        col3.metric("測試集", len(test_df))
+        col1.metric("Total rows", len(df))
+        col2.metric("Train set", len(train_df))
+        col3.metric("Test set", len(test_df))
 
-        # 3) 訓練環境
+        # 3) Training environment
         def make_train_env():
             return BitcoinTradingEnv(
                 df=train_df,
@@ -990,31 +990,31 @@ if run_btn:
         train_env = DummyVecEnv([make_train_env])
 
         effective_timesteps = int(total_timesteps)
-        if performance_mode == "快速模式":
+        if performance_mode == "Fast mode":
             effective_timesteps = min(effective_timesteps, 50_000)
 
-        # 4) 訓練 PPO
+        # 4) Train PPO
         model_loaded = False
         model_path_zip = f"{MODEL_PATH}.zip"
         if use_saved_model and os.path.exists(model_path_zip):
-            with st.spinner("載入既有模型中..."):
+            with st.spinner("Loading existing model..."):
                 try:
                     model = PPO.load(MODEL_PATH, env=train_env, device="auto")
                     model_loaded = True
-                    st.info("已載入既有模型，跳過重新訓練。")
+                    st.info("Existing model loaded; retraining skipped.")
                 except Exception as load_err:
                     st.warning(
-                        "偵測到既有模型與目前特徵維度/觀測空間不相容，"
-                        "已自動切換為重新訓練。\n\n"
-                        f"原因：{str(load_err)}"
+                        "The existing model is incompatible with the current feature dimensions / observation space. "
+                        "Switching to retraining automatically.\n\n"
+                        f"Reason: {str(load_err)}"
                     )
                     model_loaded = False
 
         if not model_loaded:
-            with st.spinner(f"訓練 PPO 模型中（{effective_timesteps:,} 步）..."):
+            with st.spinner(f"Training PPO model ({effective_timesteps:,} steps)..."):
                 policy_kwargs = build_attention_policy_kwargs(market_feature_dim=len(feature_cols), agent_state_dim=4)
 
-                if performance_mode == "快速模式":
+                if performance_mode == "Fast mode":
                     n_steps = 512
                     batch_size = 64
                     n_epochs = 8
@@ -1042,9 +1042,9 @@ if run_btn:
                 model.learn(total_timesteps=effective_timesteps)
                 model.save(MODEL_PATH)
 
-        st.success(f"✅ 模型訓練完成，已儲存為 `{MODEL_PATH}.zip`")
+        st.success(f"✅ Model training completed and saved as `{MODEL_PATH}.zip`")
 
-        # 5) 測試評估
+        # 5) Test evaluation
         test_env = BitcoinTradingEnv(
             df=test_df,
             feature_cols=feature_cols,
@@ -1102,8 +1102,8 @@ if run_btn:
         buy_hold_curve = float(initial_balance) * (test_prices / test_prices[0])
 
         benchmark_df = None
-        if run_benchmark_suite and performance_mode == "完整模式":
-            with st.spinner("執行三基準對標（B&H / 動能 / Vanilla PPO）..."):
+        if run_benchmark_suite and performance_mode == "Full mode":
+            with st.spinner("Running benchmark comparison (B&H / Momentum / Vanilla PPO)..."):
                 env_kwargs = {
                     "initial_balance": float(initial_balance),
                     "trade_fee": trade_fee,
@@ -1150,33 +1150,33 @@ if run_btn:
 
         time_axis, use_datetime = get_time_axis(test_df, len(equity_curve))
 
-        # 6) 指標顯示
-        st.subheader("📊 測試集績效指標")
+        # 6) Metrics display
+        st.subheader("📊 Test Set Performance Metrics")
         m1, m2, m3, m4 = st.columns(4)
         cr  = metrics["cumulative_return"]
         bh_cr = (buy_hold_curve[len(equity_curve) - 1] / float(initial_balance)) - 1.0
-        m1.metric("累積報酬率（RL）",  f"{cr * 100:.2f} %", delta=f"{(cr - bh_cr) * 100:.2f} % vs B&H")
+        m1.metric("Cumulative Return (RL)",  f"{cr * 100:.2f} %", delta=f"{(cr - bh_cr) * 100:.2f} % vs B&H")
         m2.metric("Sharpe Ratio",       f"{metrics['sharpe_ratio']:.3f}")
-        m3.metric("最大回撤",            f"{metrics['max_drawdown'] * 100:.2f} %")
-        m4.metric("最終資產（USD）",     f"{equity_curve[-1]:,.2f}")
+        m3.metric("Max Drawdown",       f"{metrics['max_drawdown'] * 100:.2f} %")
+        m4.metric("Final Equity (USD)", f"{equity_curve[-1]:,.2f}")
 
-        # 6-0) 目前市場 Regime
+        # 6-0) Current market regime
         current_regime = str(df["market_regime"].iloc[-1])
         regime_name_map = {
-            "bull_trend": "多頭趨勢",
-            "bear_trend": "空頭趨勢",
-            "range_bound": "盤整震盪",
-            "high_volatility": "高波動",
+            "bull_trend": "Bull Trend",
+            "bear_trend": "Bear Trend",
+            "range_bound": "Range Bound",
+            "high_volatility": "High Volatility",
         }
         regime_cn = regime_name_map.get(current_regime, current_regime)
-        st.subheader("🌦️ 目前市場 Regime")
+        st.subheader("🌦️ Current Market Regime")
         r1, r2, r3 = st.columns(3)
         r1.metric("Regime", regime_cn)
         regime_thresholds = get_regime_thresholds(current_regime, base_threshold, strictness_multiplier)
-        r2.metric("Buy 閾值", f"{regime_thresholds['buy'] * 100:.1f} %")
-        r3.metric("Sell 閾值", f"{regime_thresholds['sell'] * 100:.1f} %")
+        r2.metric("Buy threshold", f"{regime_thresholds['buy'] * 100:.1f} %")
+        r3.metric("Sell threshold", f"{regime_thresholds['sell'] * 100:.1f} %")
 
-        # 6-1) 下一根 K 棒訊號（1d 時可視為明日訊號）
+        # 6-1) Next-bar signal (for 1d data, this can be treated as tomorrow's signal)
         next_signal = infer_next_signal(
             model=model,
             df=df,
@@ -1185,77 +1185,77 @@ if run_btn:
             base_threshold=base_threshold,
             strictness_multiplier=strictness_multiplier,
         )
-        st.subheader("🔮 下一根 K 棒建議訊號")
+        st.subheader("🔮 Next Bar Recommendation")
         s1, s2, s3, s4 = st.columns(4)
-        s1.metric("建議動作", next_signal["label"])
-        s2.metric("信心分數", f"{next_signal['confidence'] * 100:.1f} %")
-        s3.metric("Buy 分數", f"{next_signal['scores'][1] * 100:.1f} %")
-        s4.metric("Sell 分數", f"{next_signal['scores'][0] * 100:.1f} %")
+        s1.metric("Recommended action", next_signal["label"])
+        s2.metric("Confidence", f"{next_signal['confidence'] * 100:.1f} %")
+        s3.metric("Buy score", f"{next_signal['scores'][1] * 100:.1f} %")
+        s4.metric("Sell score", f"{next_signal['scores'][0] * 100:.1f} %")
         st.caption(
-            f"原始連續動作: {next_signal['raw_action']:.3f}（{next_signal['raw_label']}）｜"
-            f"Regime 閾值 Buy>={next_signal['thresholds']['buy'] * 100:.1f}% / "
+            f"Raw continuous action: {next_signal['raw_action']:.3f} ({next_signal['raw_label']}) | "
+            f"Regime thresholds Buy>={next_signal['thresholds']['buy'] * 100:.1f}% / "
             f"Sell>={next_signal['thresholds']['sell'] * 100:.1f}%"
         )
 
         if benchmark_df is not None:
-            st.subheader("🧭 多基準對標結果")
+            st.subheader("🧭 Benchmark Comparison")
             st.dataframe(benchmark_df, use_container_width=True)
 
-        if run_shap_analysis and performance_mode == "完整模式":
-            st.subheader("🔬 SMC 因子貢獻（SHAP/Permutation）")
+        if run_shap_analysis and performance_mode == "Full mode":
+            st.subheader("🔬 SMC Feature Contribution (SHAP / Permutation)")
             obs_matrix = test_env.features
             shap_df = explain_actor_with_shap(model, obs_matrix, feature_cols, max_samples=180)
             st.dataframe(shap_df.head(20), use_container_width=True)
 
-        # 6-2) 進階風險指標
+        # 6-2) Advanced risk metrics
         adv = compute_advanced_metrics(equity_curve, action_history)
-        st.subheader("🧪 進階風險指標")
+        st.subheader("🧪 Advanced Risk Metrics")
         a1, a2, a3, a4 = st.columns(4)
         a1.metric("Sortino Ratio", f"{adv['sortino_ratio']:.3f}")
         a2.metric("Calmar Ratio", f"{adv['calmar_ratio']:.3f}")
-        a3.metric("交易次數", f"{adv['trade_count']}")
-        a4.metric("交易密度", f"{adv['trade_density'] * 100:.1f} %")
+        a3.metric("Trade count", f"{adv['trade_count']}")
+        a4.metric("Trade density", f"{adv['trade_density'] * 100:.1f} %")
 
         if stress_df is not None:
-            st.subheader("🧱 成本壓力測試")
+            st.subheader("🧱 Cost Stress Test")
             st.dataframe(stress_df, use_container_width=True)
             stress_chart = stress_df.set_index("Scenario")[["FinalNetWorth"]]
             st.bar_chart(stress_chart)
 
-        st.subheader("🧾 交易執行日誌")
+        st.subheader("🧾 Trade Execution Log")
         if len(trade_log) > 0:
             trade_df = pd.DataFrame(trade_log)
             st.dataframe(trade_df.tail(100), use_container_width=True)
             exec_mix = trade_df["execution"].value_counts().rename_axis("Execution").to_frame("Count")
             st.bar_chart(exec_mix)
         else:
-            st.info("本次測試無成交紀錄（可能被風險或門檻過濾）。")
+            st.info("No trades were recorded in this run (they may have been filtered by risk controls or thresholds).")
 
         if yf_interval == "1d":
-            st.info("此訊號對應下一根日線（可視為明日建議）。")
+            st.info("This signal maps to the next daily bar (roughly tomorrow's recommendation).")
         else:
-            st.info("此訊號對應下一根 K 棒（你目前使用的是 1h 週期）。")
+            st.info("This signal maps to the next bar (you are currently using a 1h interval).")
 
-        # 7) 圖表
-        st.subheader("🧩 歷史績效儀表板")
+        # 7) Charts
+        st.subheader("🧩 Historical Performance Dashboard")
         st.pyplot(plot_performance_dashboard(equity_curve, buy_hold_curve, time_axis, use_datetime, action_history))
 
-        st.subheader("📈 資產曲線")
+        st.subheader("📈 Equity Curve")
         st.pyplot(plot_equity_curve(equity_curve, buy_hold_curve, time_axis, use_datetime))
 
-        st.subheader("🔔 交易訊號")
+        st.subheader("🔔 Trade Signals")
         st.pyplot(plot_price_with_signals(test_df, action_history, time_axis, use_datetime))
 
-        st.subheader("🗺️ Regime 背景視圖")
+        st.subheader("🗺️ Regime Background View")
         st.pyplot(plot_price_with_regime_overlay(test_df, action_history, time_axis, use_datetime))
 
         col_a, col_b = st.columns(2)
         with col_a:
-            st.subheader("🎯 動作分佈")
+            st.subheader("🎯 Action Distribution")
             st.pyplot(plot_action_distribution(action_history))
 
         with col_b:
-            st.subheader("📉 資產曲線（資料）")
+            st.subheader("📉 Equity Curve (Data)")
             eq_df = pd.DataFrame({
                 "RL Agent": equity_curve,
                 "Buy & Hold": buy_hold_curve[: len(equity_curve)],
@@ -1265,12 +1265,12 @@ if run_btn:
                 eq_df = eq_df.set_index("Datetime")
             st.line_chart(eq_df)
 
-        effective_walk_forward = enable_walk_forward and performance_mode == "完整模式"
-        if enable_walk_forward and performance_mode == "快速模式":
-            st.info("快速模式下已自動略過 Walk-forward，以縮短等待時間。")
+        effective_walk_forward = enable_walk_forward and performance_mode == "Full mode"
+        if enable_walk_forward and performance_mode == "Fast mode":
+            st.info("Walk-forward is automatically skipped in fast mode to reduce wait time.")
 
         if effective_walk_forward:
-            with st.spinner("執行 Walk-forward 滾動回測中..."):
+            with st.spinner("Running walk-forward rolling backtest..."):
                 wf_df = run_walk_forward_backtest(
                     df=df,
                     feature_cols=feature_cols,
@@ -1300,7 +1300,7 @@ if run_btn:
                 )
 
             if not wf_df.empty:
-                st.subheader("🔁 Walk-forward 回測結果")
+                st.subheader("🔁 Walk-forward Backtest Results")
                 st.dataframe(wf_df, use_container_width=True)
                 wf_summary = pd.DataFrame(
                     {
@@ -1312,42 +1312,42 @@ if run_btn:
                 st.dataframe(wf_summary, use_container_width=True)
                 st.line_chart(wf_df.set_index("Fold")[["CumulativeReturn", "Sharpe"]])
             else:
-                st.warning("Walk-forward 參數超出資料長度，請調小訓練/測試窗口或折數。")
+                st.warning("Walk-forward parameters exceed the data length. Reduce the train/test windows or the number of folds.")
 
-        # 8) 訓練資料摘要
-        with st.expander("📋 原始資料摘要"):
+        # 8) Training data summary
+        with st.expander("📋 Raw Data Summary"):
             st.dataframe(df_raw.tail(50), use_container_width=True)
 
     except Exception as e:
-        st.error(f"❌ 發生錯誤：\n\n`{str(e)}`\n\n請檢查參數或資料後重新嘗試。")
+        st.error(f"❌ An error occurred:\n\n`{str(e)}`\n\nPlease check the parameters or data and try again.")
         import traceback
-        with st.expander("🔧 詳細錯誤訊息"):
+        with st.expander("🔧 Detailed Error Message"):
             st.code(traceback.format_exc())
 
 else:
-    # 說明頁
-    st.info("👈 在左側設定好參數後，按下「開始下載 & 訓練」即可執行完整流程。")
+    # Help page
+    st.info("👈 Configure the settings in the sidebar, then press 'Start Download & Train' to run the full workflow.")
 
-    st.subheader("📌 系統架構")
+    st.subheader("📌 System Architecture")
     st.markdown("""
-| 模組 | 說明 |
+| Module | Description |
 |------|------|
-| **資料來源** | yfinance 下載 BTC-USD 歷史 K 棒，或自行上傳 CSV |
-| **特徵工程** | 技術指標 + SMC（BOS/FVG/Liquidity Sweep）+ MTF（1H/4H）因果對齊 |
-| **交易環境** | 自定義 Gymnasium Env，連續動作 $A_t \in [-1,1]$ + 動作閾值執行 |
-| **RL 演算法** | Stable-Baselines3 **PPO**（Actor-Critic + Attention extractor） |
-| **評估指標** | 累積報酬率、Sharpe Ratio、最大回撤、對比 Buy & Hold 基準 |
+| **Data source** | Download BTC-USD history from yfinance or upload your own CSV |
+| **Feature engineering** | Technical indicators + SMC (BOS/FVG/Liquidity Sweep) + MTF (1H/4H) causal alignment |
+| **Trading environment** | Custom Gymnasium env, continuous action $A_t \in [-1,1]$ with threshold-based execution |
+| **RL algorithm** | Stable-Baselines3 **PPO** (Actor-Critic + attention extractor) |
+| **Evaluation metrics** | Cumulative return, Sharpe Ratio, max drawdown, and comparison against Buy & Hold |
 """)
 
-    st.subheader("🔄 PPO 演算法簡介")
+    st.subheader("🔄 PPO Overview")
     st.markdown("""
-**Proximal Policy Optimization（PPO）** 是一種 on-policy 的 Actor-Critic 強化學習演算法：
+**Proximal Policy Optimization (PPO)** is an on-policy Actor-Critic reinforcement learning algorithm:
 
-1. **Actor（策略網路）** 輸出在當前狀態下選擇每個動作的機率
-2. **Critic（價值網路）** 估計當前狀態的期望回報 $V(s)$
-3. **Clipped Surrogate Objective** 限制策略更新幅度，避免過度偏離舊策略：
+1. **Actor** outputs the probability of choosing each action in the current state
+2. **Critic** estimates the expected return $V(s)$ of the current state
+3. **Clipped surrogate objective** limits the update size so the policy does not drift too far from the old policy:
 
 $$L^{CLIP}(\\theta) = \\mathbb{E}_t \\left[ \\min\\left( r_t(\\theta) \\hat{A}_t,\\ \\text{clip}(r_t(\\theta), 1-\\epsilon, 1+\\epsilon) \\hat{A}_t \\right) \\right]$$
 
-其中 $r_t(\\theta) = \\dfrac{\\pi_\\theta(a_t|s_t)}{\\pi_{\\theta_{old}}(a_t|s_t)}$，$\\hat{A}_t$ 為 GAE 優勢估計。
+where $r_t(\\theta) = \\dfrac{\\pi_\\theta(a_t|s_t)}{\\pi_{\\theta_{old}}(a_t|s_t)}$ and $\\hat{A}_t$ is the GAE advantage estimate.
 """)
