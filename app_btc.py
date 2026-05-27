@@ -681,7 +681,7 @@ def plot_monthly_return_heatmap(time_axis, equity_curve, use_datetime):
     if len(equity) < 2:
         return None
 
-    monthly_equity = equity.resample("M").last()
+    monthly_equity = equity.resample("ME").last()
     monthly_returns = monthly_equity.pct_change().dropna() * 100.0
     if monthly_returns.empty:
         return None
